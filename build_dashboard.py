@@ -1,6 +1,6 @@
 """Renders the Genie Code usage SQL and AI/BI dashboard JSON for a target catalog/schema.
 
-    python3 build_dashboard.py --catalog <catalog> [--schema genie_code_usage] [--out build]
+    python3 build_dashboard.py --catalog <catalog> --schema <schema> [--out build]
 
 Writes <out>/sql/*.sql (from the sql/ templates) and <out>/genie_code_usage_dashboard.json.
 """
@@ -26,7 +26,7 @@ CAT_SCALE = {"type": "categorical",
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--catalog", required=True, help="catalog that will hold the views")
-parser.add_argument("--schema", default="genie_code_usage", help="schema that will hold the views")
+parser.add_argument("--schema", required=True, help="existing schema that will hold the views")
 parser.add_argument("--out", default="build", help="output directory")
 args = parser.parse_args()
 CATALOG, SCHEMA = args.catalog, args.schema

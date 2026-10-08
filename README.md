@@ -57,45 +57,35 @@ All four keep the last 90 days. They refresh daily at 02:00 (01, 02), 04:00 (03)
 ## Deploy
 
 Prerequisites:
-- The Databricks CLI, authenticated to the target workspace
+- The Databricks CLI, authenticated for the target workspace profile
+- Python 3
 - Access to the `system.access` tables
 - A SQL warehouse
-- A catalog where you can create a schema
+- An **existing** catalog and schema where you can create materialized views. The deploy never creates a schema.
 
-1. **Render the SQL and dashboard JSON** for your catalog and schema. The schema is created in step 2, and defaults to `genie_code_usage`:
+Deploy the views and dashboard in one command:
 
-   ```bash
-   python3 build_dashboard.py --catalog <catalog> [--schema genie_code_usage]
-   ```
+```bash
+python3 deploy.py --profile <profile> --warehouse-id <warehouse-id> \
+  --catalog <catalog> --schema <schema>
+```
 
-   This writes `build/sql/00`–`04_*.sql` and `build/genie_code_usage_dashboard.json`. The files in `sql/` are templates that use `${catalog}` and `${schema}`; don't run them directly. `build/` is git-ignored.
+The script:
+1. Checks that `<catalog>.<schema>` exists, and stops if it doesn't.
+2. Renders the SQL templates in `sql/` and the dashboard JSON into `build/`, which is git-ignored.
+3. Creates the four materialized views in dependency order. `02` scans 90 days of audit logs and takes a few minutes.
+4. Creates the dashboard in `/Workspace/Users/<you>/GenieCodeUsage` (change this with `--parent-path`) and publishes it. It then prints the dashboard ID and the published link.
 
-2. **Create the schema and views**, in order:
+**Later runs:** pass the printed ID so the same dashboard is updated instead of a second copy being created:
 
-   ```bash
-   export DATABRICKS_WAREHOUSE_ID=<warehouse-id>
-   for f in build/sql/*.sql; do
-     databricks experimental aitools tools query --profile <profile> --file "$f"
-   done
-   ```
+```bash
+python3 deploy.py ... --dashboard-id <dashboard-id>                 # update views and dashboard
+python3 deploy.py ... --dashboard-id <dashboard-id> --skip-views    # dashboard-only change
+```
 
-   `02` scans 90 days of audit logs and takes a few minutes.
+You only need to re-run the view step after editing the SQL. The views refresh themselves daily.
 
-3. **Create the dashboard and publish it.** `parent_path` must already exist; create it with `databricks workspace mkdirs <folder>` if needed.
-
-   ```bash
-   databricks lakeview create --profile <profile> \
-     --display-name "Genie Code Usage Patterns" \
-     --warehouse-id <warehouse-id> \
-     --dataset-catalog <catalog> --dataset-schema <schema> \
-     --serialized-dashboard "$(cat build/genie_code_usage_dashboard.json)" \
-     --json '{"parent_path": "/Workspace/Users/<you>/GenieCodeUsage"}'
-   databricks lakeview publish <dashboard-id> --profile <profile> --warehouse-id <warehouse-id>
-   ```
-
-   `lakeview create` returns the new dashboard's ID. Save it for later changes; running `create` again makes a second copy with a new link.
-
-4. **To change an existing dashboard**, run step 1 again. Then run `databricks lakeview update <dashboard-id>` with the same `--dataset-catalog`, `--dataset-schema` and `--serialized-dashboard` flags, then `publish` again.
+To render the files without deploying, run `python3 build_dashboard.py --catalog <catalog> --schema <schema>`.
 
 ## Access and privacy
 
