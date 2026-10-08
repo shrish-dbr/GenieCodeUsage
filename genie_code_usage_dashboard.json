@@ -1,0 +1,4047 @@
+{
+  "datasets": [
+    {
+      "name": "ds_users",
+      "displayName": "Genie Code daily users",
+      "queryLines": [
+        "WITH auto_days AS (SELECT DISTINCT user_email, session_date FROM gc_sessions WHERE user_type = 'Automated / eval'),\n",
+        "users_typed AS (\n",
+        "  SELECT d.event_date, d.workspace_name, d.user_email, d.client_type, d.events,\n",
+        "         CASE WHEN d.user_email IS NULL OR d.user_email NOT LIKE '%@%' OR a.user_email IS NOT NULL\n",
+        "              THEN 'Automated / eval' ELSE 'Human' END AS user_type\n",
+        "  FROM gc_daily_users d\n",
+        "  LEFT JOIN auto_days a ON d.user_email = a.user_email AND d.event_date = a.session_date\n",
+        ")\n",
+        "SELECT event_date, workspace_name, user_email, client_type, events, user_type\n",
+        "FROM users_typed\n"
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_sessions",
+      "displayName": "Genie Code agent sessions",
+      "queryLines": [
+        "WITH uc AS (SELECT user_email, primary_category, count(*) AS n FROM gc_sessions\n",
+        "            WHERE primary_category <> 'Q&A / Read-only' GROUP BY ALL),\n",
+        "ut AS (SELECT user_email, max_by(primary_category, n) AS user_top_category FROM uc GROUP BY user_email),\n",
+        "uw AS (SELECT user_email, workspace_name, count(*) AS n FROM gc_sessions\n",
+        "       WHERE workspace_name <> 'Account-level' GROUP BY ALL),\n",
+        "up AS (SELECT user_email, max_by(workspace_name, n) AS user_primary_workspace FROM uw GROUP BY user_email)\n",
+        "SELECT s.session_id, s.session_date, s.session_start, s.session_end, s.workspace_name, s.user_email, s.user_type, s.surface,\n",
+        "       s.primary_category, s.categories_used, coalesce(array_join(s.categories, ', '), '') AS categories_list,\n",
+        "       s.active_minutes, round(s.duration_minutes, 1) AS duration_minutes,\n",
+        "       s.total_actions, s.signal_actions, s.cells_run, s.notebooks_created, s.error_count,\n",
+        "       coalesce(ut.user_top_category, 'Q&A / Read-only') AS user_top_category,\n",
+        "       coalesce(up.user_primary_workspace, 'Account-level') AS user_primary_workspace,\n",
+        "       CASE WHEN s.primary_category <> 'Q&A / Read-only' THEN 1 ELSE 0 END AS is_action_session,\n",
+        "       date_format(s.session_start, 'E') AS day_of_week,\n",
+        "       hour(s.session_start) AS hour_of_day,\n",
+        "       CASE WHEN s.active_minutes <= 1 THEN '1 min' WHEN s.active_minutes <= 5 THEN '2-5 min'\n",
+        "            WHEN s.active_minutes <= 15 THEN '6-15 min' WHEN s.active_minutes <= 60 THEN '16-60 min'\n",
+        "            ELSE '60+ min' END AS session_length,\n",
+        "       CASE WHEN s.categories_used = 0 THEN '0 (read-only)' WHEN s.categories_used = 1 THEN '1 category'\n",
+        "            WHEN s.categories_used = 2 THEN '2 categories' ELSE '3+ categories' END AS categories_bucket\n",
+        "FROM gc_sessions s\n",
+        "LEFT JOIN ut USING (user_email)\n",
+        "LEFT JOIN up USING (user_email)\n",
+        "ORDER BY s.session_start DESC\n"
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_activity",
+      "displayName": "Genie Code agent activity",
+      "queryLines": [
+        "SELECT event_date, workspace_name, user_email, session_id, user_type, surface, primary_category,\n",
+        "       category, activity, active_minutes, actions, errors\n",
+        "FROM gc_session_activity\n"
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_activity_table",
+      "displayName": "Agent activities (flat)",
+      "queryLines": [
+        "SELECT category, activity,\n",
+        "       count(DISTINCT session_id) AS sessions,\n",
+        "       count(DISTINCT user_email) AS users,\n",
+        "       count(DISTINCT workspace_name) AS workspaces,\n",
+        "       sum(actions) AS agent_actions,\n",
+        "       sum(errors) AS errors,\n",
+        "       try_divide(sum(errors), sum(actions)) AS error_rate\n",
+        "FROM gc_session_activity\n",
+        "WHERE event_date BETWEEN :date_range.min AND :date_range.max\n",
+        "  AND (size(:p_workspace) = 0 OR array_contains(:p_workspace, workspace_name))\n",
+        "  AND (size(:p_user) = 0 OR array_contains(:p_user, user_email))\n",
+        "  AND (size(:p_user_type) = 0 OR array_contains(:p_user_type, user_type))\n",
+        "  AND (size(:p_surface) = 0 OR array_contains(:p_surface, surface))\n",
+        "  AND (size(:p_category) = 0 OR array_contains(:p_category, primary_category))\n",
+        "GROUP BY category, activity\n",
+        "ORDER BY sessions DESC\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "date_range",
+          "displayName": "Date",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "2000-01-01"
+              },
+              "max": {
+                "value": "2099-12-31"
+              }
+            }
+          }
+        },
+        {
+          "keyword": "p_workspace",
+          "displayName": "Workspace",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user",
+          "displayName": "User",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user_type",
+          "displayName": "User type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "Human"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "p_surface",
+          "displayName": "Surface",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_category",
+          "displayName": "Primary category",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        }
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_user_directory",
+      "displayName": "User directory (flat)",
+      "queryLines": [
+        "WITH uc AS (SELECT user_email, primary_category, count(*) AS n FROM gc_sessions\n",
+        "            WHERE primary_category <> 'Q&A / Read-only' GROUP BY ALL),\n",
+        "ut AS (SELECT user_email, max_by(primary_category, n) AS top_category FROM uc GROUP BY user_email),\n",
+        "uw AS (SELECT user_email, workspace_name, count(*) AS n FROM gc_sessions\n",
+        "       WHERE workspace_name <> 'Account-level' GROUP BY ALL),\n",
+        "up AS (SELECT user_email, max_by(workspace_name, n) AS primary_workspace FROM uw GROUP BY user_email),\n",
+        "s AS (SELECT * FROM gc_sessions\n",
+        "WHERE session_date BETWEEN :date_range.min AND :date_range.max\n",
+        "  AND (size(:p_workspace) = 0 OR array_contains(:p_workspace, workspace_name))\n",
+        "  AND (size(:p_user) = 0 OR array_contains(:p_user, user_email))\n",
+        "  AND (size(:p_user_type) = 0 OR array_contains(:p_user_type, user_type))\n",
+        "  AND (size(:p_surface) = 0 OR array_contains(:p_surface, surface))\n",
+        "  AND (size(:p_category) = 0 OR array_contains(:p_category, primary_category)))\n",
+        "SELECT s.user_email,\n",
+        "       coalesce(ut.top_category, 'Q&A / Read-only') AS top_category,\n",
+        "       coalesce(up.primary_workspace, 'Account-level') AS primary_workspace,\n",
+        "       count(*) AS sessions,\n",
+        "       avg(CASE WHEN s.primary_category <> 'Q&A / Read-only' THEN 1 ELSE 0 END) AS action_rate,\n",
+        "       count(DISTINCT s.session_date) AS active_days,\n",
+        "       min(s.session_date) AS first_seen,\n",
+        "       max(s.session_date) AS last_seen,\n",
+        "       sum(s.active_minutes) AS active_minutes,\n",
+        "       sum(s.cells_run) AS cells_run,\n",
+        "       sum(s.notebooks_created) AS notebooks_created,\n",
+        "       count(DISTINCT s.workspace_name) AS workspaces\n",
+        "FROM s\n",
+        "LEFT JOIN ut ON s.user_email = ut.user_email\n",
+        "LEFT JOIN up ON s.user_email = up.user_email\n",
+        "GROUP BY ALL\n",
+        "ORDER BY sessions DESC\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "date_range",
+          "displayName": "Date",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "2000-01-01"
+              },
+              "max": {
+                "value": "2099-12-31"
+              }
+            }
+          }
+        },
+        {
+          "keyword": "p_workspace",
+          "displayName": "Workspace",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user",
+          "displayName": "User",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user_type",
+          "displayName": "User type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "Human"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "p_surface",
+          "displayName": "Surface",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_category",
+          "displayName": "Primary category",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        }
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_top_ws_users",
+      "displayName": "Top workspaces by users",
+      "queryLines": [
+        "WITH auto_days AS (SELECT DISTINCT user_email, session_date FROM gc_sessions WHERE user_type = 'Automated / eval'),\n",
+        "users_typed AS (\n",
+        "  SELECT d.event_date, d.workspace_name, d.user_email, d.client_type, d.events,\n",
+        "         CASE WHEN d.user_email IS NULL OR d.user_email NOT LIKE '%@%' OR a.user_email IS NOT NULL\n",
+        "              THEN 'Automated / eval' ELSE 'Human' END AS user_type\n",
+        "  FROM gc_daily_users d\n",
+        "  LEFT JOIN auto_days a ON d.user_email = a.user_email AND d.event_date = a.session_date\n",
+        ")\n",
+        "SELECT workspace_name, count(DISTINCT user_email) AS users\n",
+        "FROM users_typed\n",
+        "WHERE event_date BETWEEN :date_range.min AND :date_range.max\n",
+        "  AND (size(:p_workspace) = 0 OR array_contains(:p_workspace, workspace_name))\n",
+        "  AND (size(:p_user) = 0 OR array_contains(:p_user, user_email))\n",
+        "  AND (size(:p_user_type) = 0 OR array_contains(:p_user_type, user_type))\n",
+        "  AND (size(:p_client) = 0 OR array_contains(:p_client, client_type))\n",
+        "GROUP BY workspace_name\n",
+        "ORDER BY users DESC\n",
+        "LIMIT 15\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "date_range",
+          "displayName": "Date",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "2000-01-01"
+              },
+              "max": {
+                "value": "2099-12-31"
+              }
+            }
+          }
+        },
+        {
+          "keyword": "p_workspace",
+          "displayName": "Workspace",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user",
+          "displayName": "User",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user_type",
+          "displayName": "User type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "Human"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "p_client",
+          "displayName": "Client type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        }
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_ud_activity",
+      "displayName": "User detail: activities",
+      "queryLines": [
+        "SELECT category, activity,\n",
+        "       count(DISTINCT session_id) AS sessions,\n",
+        "       count(DISTINCT user_email) AS users,\n",
+        "       count(DISTINCT workspace_name) AS workspaces,\n",
+        "       sum(actions) AS agent_actions,\n",
+        "       sum(errors) AS errors,\n",
+        "       try_divide(sum(errors), sum(actions)) AS error_rate\n",
+        "FROM gc_session_activity\n",
+        "WHERE event_date BETWEEN :date_range.min AND :date_range.max\n",
+        "  AND (size(:p_workspace) = 0 OR array_contains(:p_workspace, workspace_name))\n",
+        "  AND (size(:p_user) = 0 OR array_contains(:p_user, user_email))\n",
+        "  AND (size(:p_user_type) = 0 OR array_contains(:p_user_type, user_type))\n",
+        "  AND (size(:p_surface) = 0 OR array_contains(:p_surface, surface))\n",
+        "  AND (size(:p_category) = 0 OR array_contains(:p_category, primary_category))\n",
+        "  AND (size(:p_ud_user) = 0 OR array_contains(:p_ud_user, user_email))\n",
+        "GROUP BY category, activity\n",
+        "ORDER BY sessions DESC\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "date_range",
+          "displayName": "Date",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "2000-01-01"
+              },
+              "max": {
+                "value": "2099-12-31"
+              }
+            }
+          }
+        },
+        {
+          "keyword": "p_workspace",
+          "displayName": "Workspace",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user",
+          "displayName": "User",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user_type",
+          "displayName": "User type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "Human"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "p_surface",
+          "displayName": "Surface",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_category",
+          "displayName": "Primary category",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_ud_user",
+          "displayName": "User (detail page)",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        }
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    },
+    {
+      "name": "ds_ud_workspaces",
+      "displayName": "User detail: top workspaces",
+      "queryLines": [
+        "WITH s AS (SELECT workspace_name, surface, session_id FROM gc_sessions\n",
+        "WHERE session_date BETWEEN :date_range.min AND :date_range.max\n",
+        "  AND (size(:p_workspace) = 0 OR array_contains(:p_workspace, workspace_name))\n",
+        "  AND (size(:p_user) = 0 OR array_contains(:p_user, user_email))\n",
+        "  AND (size(:p_user_type) = 0 OR array_contains(:p_user_type, user_type))\n",
+        "  AND (size(:p_surface) = 0 OR array_contains(:p_surface, surface))\n",
+        "  AND (size(:p_category) = 0 OR array_contains(:p_category, primary_category))\n",
+        "  AND (size(:p_ud_user) = 0 OR array_contains(:p_ud_user, user_email))),\n",
+        "top_ws AS (SELECT workspace_name FROM s GROUP BY workspace_name ORDER BY count(*) DESC LIMIT 10)\n",
+        "SELECT s.workspace_name, s.surface, count(*) AS sessions\n",
+        "FROM s JOIN top_ws USING (workspace_name)\n",
+        "GROUP BY ALL\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "date_range",
+          "displayName": "Date",
+          "dataType": "DATE",
+          "complexType": "RANGE",
+          "defaultSelection": {
+            "range": {
+              "dataType": "DATE",
+              "min": {
+                "value": "2000-01-01"
+              },
+              "max": {
+                "value": "2099-12-31"
+              }
+            }
+          }
+        },
+        {
+          "keyword": "p_workspace",
+          "displayName": "Workspace",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user",
+          "displayName": "User",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_user_type",
+          "displayName": "User type",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "Human"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "p_surface",
+          "displayName": "Surface",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_category",
+          "displayName": "Primary category",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        },
+        {
+          "keyword": "p_ud_user",
+          "displayName": "User (detail page)",
+          "dataType": "STRING",
+          "complexType": "MULTI",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": []
+            }
+          }
+        }
+      ],
+      "catalog": "serverless_stable_12edvn_catalog",
+      "schema": "genie_code_usage"
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "ov_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Genie Code Usage Patterns\n",
+                "\n",
+                "How people use **Genie Code** (formerly Databricks Assistant) across workspaces: who is using it, and what the agent is doing on their behalf: writing code, exploring the catalog, running SQL, building dashboards, data engineering, ML, or answering questions. Categories come from the actions the Genie Code agent performs (audit events tagged `databricks-background-genie`). Defaults to **human** usage; switch *User type* on the Filters page to include automated / eval traffic."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "countdistinct(user_email)",
+                      "expression": "COUNT(DISTINCT `user_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(user_email)",
+                  "displayName": "Users",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active Genie Code users",
+                "showDescription": true,
+                "description": "Distinct users with Genie Code events (all clients)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_workspaces",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "countdistinct(workspace_name)",
+                      "expression": "COUNT(DISTINCT `workspace_name`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(workspace_name)",
+                  "displayName": "Workspaces",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active workspaces",
+                "showDescription": true,
+                "description": "Workspaces with Genie Code usage"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_sessions",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(session_id)",
+                  "displayName": "Sessions",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Agent sessions",
+                "showDescription": true,
+                "description": "Genie Code agent sessions (sid)"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_action_rate",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "avg(is_action_session)",
+                      "expression": "AVG(`is_action_session`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(is_action_session)",
+                  "displayName": "Action rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Sessions that took action",
+                "showDescription": true,
+                "description": "Share of sessions where the agent changed or ran something (vs read-only Q&A)"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "wau_by_client",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "weekly(event_date)",
+                      "expression": "DATE_TRUNC(\"WEEK\", `event_date`)"
+                    },
+                    {
+                      "name": "client_type",
+                      "expression": "`client_type`"
+                    },
+                    {
+                      "name": "countdistinct(user_email)",
+                      "expression": "COUNT(DISTINCT `user_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "weekly(event_date)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Week"
+                },
+                "y": {
+                  "fieldName": "countdistinct(user_email)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Weekly active users"
+                },
+                "color": {
+                  "fieldName": "client_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Client",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Weekly active users by client",
+                "showDescription": true,
+                "description": "From system.access.assistant_events"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "weekly_sessions_by_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "weekly(session_date)",
+                      "expression": "DATE_TRUNC(\"WEEK\", `session_date`)"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "weekly(session_date)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Week"
+                },
+                "y": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Weekly agent sessions by primary category",
+                "showDescription": true,
+                "description": "Primary category = what the agent spent the most active minutes on"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "pie_primary_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Session mix by primary category"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "sessions_touching_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "color": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Category",
+                  "legend": {
+                    "hide": true
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Sessions using each category",
+                "showDescription": true,
+                "description": "A session can span several categories"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 13,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "users_per_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "countdistinct(user_email)",
+                      "expression": "COUNT(DISTINCT `user_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "countdistinct(user_email)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Users"
+                },
+                "y": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "color": {
+                  "fieldName": "category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Category",
+                  "legend": {
+                    "hide": true
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Users by category",
+                "showDescription": true,
+                "description": "Distinct users whose agent sessions touched each category"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 20,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "patterns",
+      "displayName": "Usage Patterns",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "pt_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Usage patterns\n",
+                "\n",
+                "When and where Genie Code is used, how deep sessions go, and the specific agent activities behind each category. Times are UTC."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "heat_dow_hour",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "hour_of_day",
+                      "expression": "`hour_of_day`"
+                    },
+                    {
+                      "name": "day_of_week",
+                      "expression": "`day_of_week`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "hour_of_day",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Hour (UTC)"
+                },
+                "y": {
+                  "fieldName": "day_of_week",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Mon",
+                        "Tue",
+                        "Wed",
+                        "Thu",
+                        "Fri",
+                        "Sat",
+                        "Sun"
+                      ]
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "color": {
+                  "fieldName": "countdistinct(session_id)",
+                  "displayName": "Sessions",
+                  "scale": {
+                    "type": "quantitative",
+                    "colorRamp": {
+                      "mode": "custom-sequential",
+                      "colors": {
+                        "start": "#E8F1F8",
+                        "end": "#0072B2"
+                      }
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "When sessions happen (day x hour, UTC)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "cat_by_surface",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Share of sessions"
+                },
+                "y": {
+                  "fieldName": "surface",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "mark": {
+                "layout": "stack-100"
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Category mix by surface",
+                "showDescription": true,
+                "description": "Where Genie Code was invoked: side panel, embedded, document, visualization"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "length_by_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "session_length",
+                      "expression": "`session_length`"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "session_length",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "1 min",
+                        "2-5 min",
+                        "6-15 min",
+                        "16-60 min",
+                        "60+ min"
+                      ]
+                    }
+                  },
+                  "displayName": "Active minutes in session"
+                },
+                "y": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Session depth (active minutes)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "cats_per_session",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "categories_bucket",
+                      "expression": "`categories_bucket`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "categories_bucket",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "0 (read-only)",
+                        "1 category",
+                        "2 categories",
+                        "3+ categories"
+                      ]
+                    }
+                  },
+                  "displayName": "Categories used in session"
+                },
+                "y": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Multi-category sessions",
+                "showDescription": true,
+                "description": "E.g. explore catalog, then write code, then build a dashboard"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "top_activities",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "activity",
+                      "expression": "`activity`"
+                    },
+                    {
+                      "name": "sessions",
+                      "expression": "`sessions`"
+                    },
+                    {
+                      "name": "users",
+                      "expression": "`users`"
+                    },
+                    {
+                      "name": "workspaces",
+                      "expression": "`workspaces`"
+                    },
+                    {
+                      "name": "agent_actions",
+                      "expression": "`agent_actions`"
+                    },
+                    {
+                      "name": "errors",
+                      "expression": "`errors`"
+                    },
+                    {
+                      "name": "error_rate",
+                      "expression": "`error_rate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "category",
+                    "displayName": "Category"
+                  },
+                  {
+                    "fieldName": "activity",
+                    "displayName": "Activity"
+                  },
+                  {
+                    "fieldName": "sessions",
+                    "displayName": "Sessions"
+                  },
+                  {
+                    "fieldName": "users",
+                    "displayName": "Users"
+                  },
+                  {
+                    "fieldName": "workspaces",
+                    "displayName": "Workspaces"
+                  },
+                  {
+                    "fieldName": "agent_actions",
+                    "displayName": "Agent actions"
+                  },
+                  {
+                    "fieldName": "errors",
+                    "displayName": "Errors"
+                  },
+                  {
+                    "fieldName": "error_rate",
+                    "displayName": "Error rate",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Agent activities by category",
+                "showDescription": true,
+                "description": "What Genie Code actually did: edits, cell runs, catalog lookups, dashboard builds, MCP tool calls. One row per activity; sort by any column."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 10
+          }
+        }
+      ]
+    },
+    {
+      "name": "people",
+      "displayName": "Workspaces & Users",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "wu_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Workspaces & users\n",
+                "\n",
+                "Which workspaces and people use Genie Code most, and for what. 'Account-level' = sessions with no workspace-scoped actions."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "ws_by_cat",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pivot",
+              "encodings": {
+                "rows": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace",
+                    "scale": {
+                      "type": "categorical",
+                      "sort": {
+                        "by": "cell-reversed",
+                        "field": {
+                          "index": 0
+                        }
+                      }
+                    }
+                  }
+                ],
+                "columns": [
+                  {
+                    "fieldName": "primary_category",
+                    "displayName": "Primary category",
+                    "total": {
+                      "show": true
+                    }
+                  }
+                ],
+                "cell": {
+                  "type": "multi-cell",
+                  "fields": [
+                    {
+                      "fieldName": "countdistinct(session_id)",
+                      "displayName": "Sessions",
+                      "cellType": "color-scale"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Sessions by workspace and primary category"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "user_directory",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "top_category",
+                      "expression": "`top_category`"
+                    },
+                    {
+                      "name": "primary_workspace",
+                      "expression": "`primary_workspace`"
+                    },
+                    {
+                      "name": "sessions",
+                      "expression": "`sessions`"
+                    },
+                    {
+                      "name": "action_rate",
+                      "expression": "`action_rate`"
+                    },
+                    {
+                      "name": "active_days",
+                      "expression": "`active_days`"
+                    },
+                    {
+                      "name": "first_seen",
+                      "expression": "`first_seen`"
+                    },
+                    {
+                      "name": "last_seen",
+                      "expression": "`last_seen`"
+                    },
+                    {
+                      "name": "active_minutes",
+                      "expression": "`active_minutes`"
+                    },
+                    {
+                      "name": "cells_run",
+                      "expression": "`cells_run`"
+                    },
+                    {
+                      "name": "notebooks_created",
+                      "expression": "`notebooks_created`"
+                    },
+                    {
+                      "name": "workspaces",
+                      "expression": "`workspaces`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_email",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "top_category",
+                    "displayName": "Top category"
+                  },
+                  {
+                    "fieldName": "primary_workspace",
+                    "displayName": "Primary workspace"
+                  },
+                  {
+                    "fieldName": "sessions",
+                    "displayName": "Sessions"
+                  },
+                  {
+                    "fieldName": "action_rate",
+                    "displayName": "Action rate",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "active_days",
+                    "displayName": "Active days"
+                  },
+                  {
+                    "fieldName": "first_seen",
+                    "displayName": "First seen"
+                  },
+                  {
+                    "fieldName": "last_seen",
+                    "displayName": "Last seen"
+                  },
+                  {
+                    "fieldName": "active_minutes",
+                    "displayName": "Active min"
+                  },
+                  {
+                    "fieldName": "cells_run",
+                    "displayName": "Cells run"
+                  },
+                  {
+                    "fieldName": "notebooks_created",
+                    "displayName": "Notebooks created"
+                  },
+                  {
+                    "fieldName": "workspaces",
+                    "displayName": "Workspaces"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User directory",
+                "showDescription": true,
+                "description": "One row per user. Top category and primary workspace cover the full 90 days; other columns follow the filters. Use the User Detail page to drill into one user."
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 12,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "ws_users_bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "sum(users)",
+                      "expression": "SUM(`users`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(users)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Users"
+                },
+                "y": {
+                  "fieldName": "workspace_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top 15 workspaces by active users",
+                "showDescription": true,
+                "description": "All Genie Code clients"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 12,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "user_detail",
+      "displayName": "User Detail",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "ud_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## User detail\n",
+                "\n",
+                "Pick one or more users (top right) to see their Genie Code activity: volume, what they use it for, where, and a log of every agent session. With no user selected, the page shows everyone."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 8,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_user",
+            "queries": [
+              {
+                "name": "ud_user_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ud_user_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ud_user_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ud_user_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_ud_user",
+                      "keyword": "p_ud_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ud_user_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_ud_user",
+                      "keyword": "p_ud_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "ud_user_ds_users",
+                    "displayName": "User(s)"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "ud_user_ds_sessions",
+                    "displayName": "User(s)"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "ud_user_ds_activity",
+                    "displayName": "User(s)"
+                  },
+                  {
+                    "parameterName": "p_ud_user",
+                    "queryName": "ud_user_ds_ud_activity_param",
+                    "displayName": "User(s)"
+                  },
+                  {
+                    "parameterName": "p_ud_user",
+                    "queryName": "ud_user_ds_ud_workspaces_param",
+                    "displayName": "User(s)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User(s)"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_kpi_sessions",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(session_id)",
+                  "displayName": "Sessions",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Agent sessions"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_kpi_action",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "avg(is_action_session)",
+                      "expression": "AVG(`is_action_session`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(is_action_session)",
+                  "displayName": "Action rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Sessions that took action"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_kpi_minutes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "sum(active_minutes)",
+                      "expression": "SUM(`active_minutes`)"
+                    },
+                    {
+                      "name": "weekly(session_date)",
+                      "expression": "DATE_TRUNC(\"WEEK\", `session_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(active_minutes)",
+                  "displayName": "Minutes",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "weekly(session_date)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active agent minutes"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_kpi_days",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "countdistinct(event_date)",
+                      "expression": "COUNT(DISTINCT `event_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(event_date)",
+                  "displayName": "Days"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active days",
+                "showDescription": true,
+                "description": "Days with any Genie Code event"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 2,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_weekly",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "weekly(session_date)",
+                      "expression": "DATE_TRUNC(\"WEEK\", `session_date`)"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "weekly(session_date)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Week"
+                },
+                "y": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Weekly sessions by primary category"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_cat_mix",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "countdistinct(session_id)",
+                      "expression": "COUNT(DISTINCT `session_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "countdistinct(session_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "color": {
+                  "fieldName": "primary_category",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Code Development",
+                        "color": "#0072B2"
+                      },
+                      {
+                        "value": "Data Discovery & Governance",
+                        "color": "#E69F00"
+                      },
+                      {
+                        "value": "Data Analysis (SQL)",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Dashboards & BI",
+                        "color": "#CC79A7"
+                      },
+                      {
+                        "value": "Data Engineering & Jobs",
+                        "color": "#D55E00"
+                      },
+                      {
+                        "value": "ML & AI",
+                        "color": "#56B4E9"
+                      },
+                      {
+                        "value": "External Tools (MCP)",
+                        "color": "#7B5EA7"
+                      },
+                      {
+                        "value": "Q&A / Read-only",
+                        "color": "#A0A7AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Primary category"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Category mix"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_activities",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "fields": [
+                    {
+                      "name": "category",
+                      "expression": "`category`"
+                    },
+                    {
+                      "name": "activity",
+                      "expression": "`activity`"
+                    },
+                    {
+                      "name": "sessions",
+                      "expression": "`sessions`"
+                    },
+                    {
+                      "name": "users",
+                      "expression": "`users`"
+                    },
+                    {
+                      "name": "agent_actions",
+                      "expression": "`agent_actions`"
+                    },
+                    {
+                      "name": "errors",
+                      "expression": "`errors`"
+                    },
+                    {
+                      "name": "error_rate",
+                      "expression": "`error_rate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "category",
+                    "displayName": "Category"
+                  },
+                  {
+                    "fieldName": "activity",
+                    "displayName": "Activity"
+                  },
+                  {
+                    "fieldName": "sessions",
+                    "displayName": "Sessions"
+                  },
+                  {
+                    "fieldName": "users",
+                    "displayName": "Users"
+                  },
+                  {
+                    "fieldName": "agent_actions",
+                    "displayName": "Agent actions"
+                  },
+                  {
+                    "fieldName": "errors",
+                    "displayName": "Errors"
+                  },
+                  {
+                    "fieldName": "error_rate",
+                    "displayName": "Error rate",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "What the agent did",
+                "showDescription": true,
+                "description": "One row per activity"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 12,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_workspaces",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "sum(sessions)",
+                      "expression": "SUM(`sessions`)"
+                    },
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(sessions)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sessions"
+                },
+                "y": {
+                  "fieldName": "workspace_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "color": {
+                  "fieldName": "surface",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Surface",
+                  "legend": {
+                    "position": "bottom"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top workspaces and surfaces",
+                "showDescription": true,
+                "description": "Top 10 workspaces by sessions"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 12,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ud_session_log",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "session_start",
+                      "expression": "`session_start`"
+                    },
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    },
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    },
+                    {
+                      "name": "categories_list",
+                      "expression": "`categories_list`"
+                    },
+                    {
+                      "name": "active_minutes",
+                      "expression": "`active_minutes`"
+                    },
+                    {
+                      "name": "duration_minutes",
+                      "expression": "`duration_minutes`"
+                    },
+                    {
+                      "name": "total_actions",
+                      "expression": "`total_actions`"
+                    },
+                    {
+                      "name": "cells_run",
+                      "expression": "`cells_run`"
+                    },
+                    {
+                      "name": "notebooks_created",
+                      "expression": "`notebooks_created`"
+                    },
+                    {
+                      "name": "error_count",
+                      "expression": "`error_count`"
+                    },
+                    {
+                      "name": "session_id",
+                      "expression": "`session_id`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "session_start",
+                    "displayName": "Started (UTC)"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "surface",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "fieldName": "primary_category",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "fieldName": "categories_list",
+                    "displayName": "All categories"
+                  },
+                  {
+                    "fieldName": "active_minutes",
+                    "displayName": "Active min"
+                  },
+                  {
+                    "fieldName": "duration_minutes",
+                    "displayName": "Duration min"
+                  },
+                  {
+                    "fieldName": "total_actions",
+                    "displayName": "Agent actions"
+                  },
+                  {
+                    "fieldName": "cells_run",
+                    "displayName": "Cells run"
+                  },
+                  {
+                    "fieldName": "notebooks_created",
+                    "displayName": "Notebooks created"
+                  },
+                  {
+                    "fieldName": "error_count",
+                    "displayName": "Errors"
+                  },
+                  {
+                    "fieldName": "session_id",
+                    "displayName": "Session ID"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Session log",
+                "showDescription": true,
+                "description": "Every Genie Code agent session, newest first"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 29,
+            "width": 12,
+            "height": 9
+          }
+        }
+      ]
+    },
+    {
+      "name": "filters",
+      "displayName": "Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "f_date",
+            "queries": [
+              {
+                "name": "f_date_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "session_date",
+                      "expression": "`session_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_top_ws_users_param",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_date_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "date_range",
+                      "keyword": "date_range"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "event_date",
+                    "queryName": "f_date_ds_users",
+                    "displayName": "Date"
+                  },
+                  {
+                    "fieldName": "session_date",
+                    "queryName": "f_date_ds_sessions",
+                    "displayName": "Date"
+                  },
+                  {
+                    "fieldName": "event_date",
+                    "queryName": "f_date_ds_activity",
+                    "displayName": "Date"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "f_date_ds_activity_table_param",
+                    "displayName": "Date"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "f_date_ds_user_directory_param",
+                    "displayName": "Date"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "f_date_ds_top_ws_users_param",
+                    "displayName": "Date"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "f_date_ds_ud_activity_param",
+                    "displayName": "Date"
+                  },
+                  {
+                    "parameterName": "date_range",
+                    "queryName": "f_date_ds_ud_workspaces_param",
+                    "displayName": "Date"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Date"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_workspace",
+            "queries": [
+              {
+                "name": "f_workspace_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "p_workspace",
+                      "keyword": "p_workspace"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "p_workspace",
+                      "keyword": "p_workspace"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_top_ws_users_param",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "parameters": [
+                    {
+                      "name": "p_workspace",
+                      "keyword": "p_workspace"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_workspace",
+                      "keyword": "p_workspace"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_workspace_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_workspace",
+                      "keyword": "p_workspace"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_name",
+                    "queryName": "f_workspace_ds_users",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "queryName": "f_workspace_ds_sessions",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "queryName": "f_workspace_ds_activity",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "parameterName": "p_workspace",
+                    "queryName": "f_workspace_ds_activity_table_param",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "parameterName": "p_workspace",
+                    "queryName": "f_workspace_ds_user_directory_param",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "parameterName": "p_workspace",
+                    "queryName": "f_workspace_ds_top_ws_users_param",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "parameterName": "p_workspace",
+                    "queryName": "f_workspace_ds_ud_activity_param",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "parameterName": "p_workspace",
+                    "queryName": "f_workspace_ds_ud_workspaces_param",
+                    "displayName": "Workspace"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_user",
+            "queries": [
+              {
+                "name": "f_user_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "p_user",
+                      "keyword": "p_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "p_user",
+                      "keyword": "p_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_top_ws_users_param",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "parameters": [
+                    {
+                      "name": "p_user",
+                      "keyword": "p_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_user",
+                      "keyword": "p_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_user",
+                      "keyword": "p_user"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "f_user_ds_users",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "f_user_ds_sessions",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "queryName": "f_user_ds_activity",
+                    "displayName": "User"
+                  },
+                  {
+                    "parameterName": "p_user",
+                    "queryName": "f_user_ds_activity_table_param",
+                    "displayName": "User"
+                  },
+                  {
+                    "parameterName": "p_user",
+                    "queryName": "f_user_ds_user_directory_param",
+                    "displayName": "User"
+                  },
+                  {
+                    "parameterName": "p_user",
+                    "queryName": "f_user_ds_top_ws_users_param",
+                    "displayName": "User"
+                  },
+                  {
+                    "parameterName": "p_user",
+                    "queryName": "f_user_ds_ud_activity_param",
+                    "displayName": "User"
+                  },
+                  {
+                    "parameterName": "p_user",
+                    "queryName": "f_user_ds_ud_workspaces_param",
+                    "displayName": "User"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_user_type",
+            "queries": [
+              {
+                "name": "f_user_type_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "user_type",
+                      "expression": "`user_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "user_type",
+                      "expression": "`user_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "user_type",
+                      "expression": "`user_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "p_user_type",
+                      "keyword": "p_user_type"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "p_user_type",
+                      "keyword": "p_user_type"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_top_ws_users_param",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "parameters": [
+                    {
+                      "name": "p_user_type",
+                      "keyword": "p_user_type"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_user_type",
+                      "keyword": "p_user_type"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_user_type_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_user_type",
+                      "keyword": "p_user_type"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "user_type",
+                    "queryName": "f_user_type_ds_users",
+                    "displayName": "User type"
+                  },
+                  {
+                    "fieldName": "user_type",
+                    "queryName": "f_user_type_ds_sessions",
+                    "displayName": "User type"
+                  },
+                  {
+                    "fieldName": "user_type",
+                    "queryName": "f_user_type_ds_activity",
+                    "displayName": "User type"
+                  },
+                  {
+                    "parameterName": "p_user_type",
+                    "queryName": "f_user_type_ds_activity_table_param",
+                    "displayName": "User type"
+                  },
+                  {
+                    "parameterName": "p_user_type",
+                    "queryName": "f_user_type_ds_user_directory_param",
+                    "displayName": "User type"
+                  },
+                  {
+                    "parameterName": "p_user_type",
+                    "queryName": "f_user_type_ds_top_ws_users_param",
+                    "displayName": "User type"
+                  },
+                  {
+                    "parameterName": "p_user_type",
+                    "queryName": "f_user_type_ds_ud_activity_param",
+                    "displayName": "User type"
+                  },
+                  {
+                    "parameterName": "p_user_type",
+                    "queryName": "f_user_type_ds_ud_workspaces_param",
+                    "displayName": "User type"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User type"
+              },
+              "selection": {
+                "defaultSelection": {
+                  "values": {
+                    "dataType": "STRING",
+                    "values": [
+                      {
+                        "value": "Human"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_surface",
+            "queries": [
+              {
+                "name": "f_surface_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_surface_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "surface",
+                      "expression": "`surface`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_surface_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "p_surface",
+                      "keyword": "p_surface"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_surface_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "p_surface",
+                      "keyword": "p_surface"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_surface_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_surface",
+                      "keyword": "p_surface"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_surface_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_surface",
+                      "keyword": "p_surface"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "surface",
+                    "queryName": "f_surface_ds_sessions",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "fieldName": "surface",
+                    "queryName": "f_surface_ds_activity",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "parameterName": "p_surface",
+                    "queryName": "f_surface_ds_activity_table_param",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "parameterName": "p_surface",
+                    "queryName": "f_surface_ds_user_directory_param",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "parameterName": "p_surface",
+                    "queryName": "f_surface_ds_ud_activity_param",
+                    "displayName": "Surface"
+                  },
+                  {
+                    "parameterName": "p_surface",
+                    "queryName": "f_surface_ds_ud_workspaces_param",
+                    "displayName": "Surface"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Surface"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_category",
+            "queries": [
+              {
+                "name": "f_category_ds_sessions",
+                "query": {
+                  "datasetName": "ds_sessions",
+                  "fields": [
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_category_ds_activity",
+                "query": {
+                  "datasetName": "ds_activity",
+                  "fields": [
+                    {
+                      "name": "primary_category",
+                      "expression": "`primary_category`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_category_ds_activity_table_param",
+                "query": {
+                  "datasetName": "ds_activity_table",
+                  "parameters": [
+                    {
+                      "name": "p_category",
+                      "keyword": "p_category"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_category_ds_user_directory_param",
+                "query": {
+                  "datasetName": "ds_user_directory",
+                  "parameters": [
+                    {
+                      "name": "p_category",
+                      "keyword": "p_category"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_category_ds_ud_activity_param",
+                "query": {
+                  "datasetName": "ds_ud_activity",
+                  "parameters": [
+                    {
+                      "name": "p_category",
+                      "keyword": "p_category"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_category_ds_ud_workspaces_param",
+                "query": {
+                  "datasetName": "ds_ud_workspaces",
+                  "parameters": [
+                    {
+                      "name": "p_category",
+                      "keyword": "p_category"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "primary_category",
+                    "queryName": "f_category_ds_sessions",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "fieldName": "primary_category",
+                    "queryName": "f_category_ds_activity",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "parameterName": "p_category",
+                    "queryName": "f_category_ds_activity_table_param",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "parameterName": "p_category",
+                    "queryName": "f_category_ds_user_directory_param",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "parameterName": "p_category",
+                    "queryName": "f_category_ds_ud_activity_param",
+                    "displayName": "Primary category"
+                  },
+                  {
+                    "parameterName": "p_category",
+                    "queryName": "f_category_ds_ud_workspaces_param",
+                    "displayName": "Primary category"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Primary category"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 10,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_client",
+            "queries": [
+              {
+                "name": "f_client_ds_users",
+                "query": {
+                  "datasetName": "ds_users",
+                  "fields": [
+                    {
+                      "name": "client_type",
+                      "expression": "`client_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "f_client_ds_top_ws_users_param",
+                "query": {
+                  "datasetName": "ds_top_ws_users",
+                  "parameters": [
+                    {
+                      "name": "p_client",
+                      "keyword": "p_client"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "client_type",
+                    "queryName": "f_client_ds_users",
+                    "displayName": "Client type (users)"
+                  },
+                  {
+                    "parameterName": "p_client",
+                    "queryName": "f_client_ds_top_ws_users_param",
+                    "displayName": "Client type (users)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Client type (users)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 4,
+            "height": 2
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#F7F9FA",
+        "dark": "#1F272D"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "widgetBorderColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "fontColor": {
+        "light": "#11171C",
+        "dark": "#E8ECF0"
+      },
+      "selectionColor": {
+        "light": "#2272B4",
+        "dark": "#8ACAFF"
+      },
+      "visualizationColors": [
+        "#0072B2",
+        "#E69F00",
+        "#009E73",
+        "#CC79A7",
+        "#D55E00",
+        "#56B4E9",
+        "#7B5EA7",
+        "#A0A7AE"
+      ],
+      "widgetHeaderAlignment": "LEFT",
+      "widgetCornerRadius": 8
+    }
+  }
+}
