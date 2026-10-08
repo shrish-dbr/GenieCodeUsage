@@ -48,7 +48,7 @@ All four keep the last 90 days. They refresh daily at 02:00 (01, 02), 04:00 (03)
 
 ### Dashboard pages
 
-- **Overview:** KPIs, weekly active users, monthly sessions by category, category mix
+- **Overview:** KPIs, monthly active users, monthly sessions by category, category mix
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
 - **User Detail:** top 20 users, per-user KPIs, trends, activities, workspaces and a session log
@@ -61,7 +61,7 @@ Almost every visual reads one shared dataset of sessions and activities (`ds_mai
 - **Cross-filtering:** clicking a bar, slice, heatmap cell, pivot cell or table row filters the other session and activity visuals on the same page. Line charts and KPI tiles don't start cross-filters, but they do respond to them.
 
 Exceptions:
-- **User-count visuals** ("Active users", "Active workspaces", "Weekly active users", "Active days") read `system.access.assistant_events`, which has no category or surface. They follow the date, workspace, user, user type and client filters, but not the surface or category filters, and they don't respond to clicks on session visuals.
+- **User-count visuals** ("Active users", "Active workspaces", "Monthly active users", "Active days") read `system.access.assistant_events`, which has no category or surface. They follow the date, workspace, user, user type and client filters, but not the surface or category filters, and they don't respond to clicks on session visuals.
 - **The two top-N bars** ("Top 15 workspaces", "Top 20 users") rank inside their own query, because a widget can't limit itself to the top N. They follow every filter, but clicks on them don't cross-filter.
 
 ## Deploy
