@@ -3,8 +3,10 @@
     python3 build_dashboard.py --catalog <catalog> --schema <schema> [--out build]
 
 Writes <out>/sql/*.sql (from the sql/ templates) and <out>/genie_code_usage_dashboard.json.
+Can also be imported (e.g. from deploy_notebook): render_sql() and render_dashboard().
 """
 import argparse
+import copy
 import json
 import pathlib
 import string
@@ -22,15 +24,6 @@ CAT_COLORS = {
 CAT_ORDER = list(CAT_COLORS)
 CAT_SCALE = {"type": "categorical",
              "mappings": [{"value": k, "color": v} for k, v in CAT_COLORS.items()]}
-
-
-parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("--catalog", required=True, help="catalog that will hold the views")
-parser.add_argument("--schema", required=True, help="existing schema that will hold the views")
-parser.add_argument("--out", default="build", help="output directory")
-args = parser.parse_args()
-CATALOG, SCHEMA = args.catalog, args.schema
-OUT = pathlib.Path(args.out)
 
 
 def ql(sql):
@@ -517,9 +510,6 @@ def page(name, display, layout, ptype="PAGE_TYPE_CANVAS"):
     return {"name": name, "displayName": display, "pageType": ptype, "layoutVersion": "GRID_V1", "layout": layout}
 
 
-for ds in datasets:  # queries use bare MV names; pin them to the MV catalog/schema
-    ds.update({"catalog": CATALOG, "schema": SCHEMA})
-
 dashboard = {
     "datasets": datasets,
     "pages": [page("overview", "Overview", overview),
@@ -538,11 +528,37 @@ dashboard = {
         "widgetCornerRadius": 8}},
 }
 
-ROOT = pathlib.Path(__file__).parent
-(OUT / "sql").mkdir(parents=True, exist_ok=True)
-for template in sorted((ROOT / "sql").glob("*.sql")):
-    rendered = string.Template(template.read_text()).substitute(catalog=CATALOG, schema=SCHEMA)
-    (OUT / "sql" / template.name).write_text(rendered)
-with open(OUT / "genie_code_usage_dashboard.json", "w") as fh:
-    json.dump(dashboard, fh, indent=2)
-print(f"Wrote {OUT}/sql/*.sql and {OUT}/genie_code_usage_dashboard.json for {CATALOG}.{SCHEMA}")
+SQL_DIR = pathlib.Path(__file__).parent / "sql"
+
+
+def render_sql(catalog, schema):
+    """Returns [(file name, SQL)] for the view templates in sql/, in run order."""
+    return [(t.name, string.Template(t.read_text()).substitute(catalog=catalog, schema=schema))
+            for t in sorted(SQL_DIR.glob("*.sql"))]
+
+
+def render_dashboard(catalog, schema):
+    """Returns the dashboard dict with every dataset pinned to <catalog>.<schema> (queries use bare MV names)."""
+    rendered = copy.deepcopy(dashboard)
+    for ds in rendered["datasets"]:
+        ds.update({"catalog": catalog, "schema": schema})
+    return rendered
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--catalog", required=True, help="catalog that will hold the views")
+    parser.add_argument("--schema", required=True, help="existing schema that will hold the views")
+    parser.add_argument("--out", default="build", help="output directory")
+    args = parser.parse_args()
+    out = pathlib.Path(args.out)
+    (out / "sql").mkdir(parents=True, exist_ok=True)
+    for name, sql in render_sql(args.catalog, args.schema):
+        (out / "sql" / name).write_text(sql)
+    with open(out / "genie_code_usage_dashboard.json", "w") as fh:
+        json.dump(render_dashboard(args.catalog, args.schema), fh, indent=2)
+    print(f"Wrote {out}/sql/*.sql and {out}/genie_code_usage_dashboard.json for {args.catalog}.{args.schema}")
+
+
+if __name__ == "__main__":
+    main()

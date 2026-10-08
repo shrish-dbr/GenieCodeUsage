@@ -63,29 +63,42 @@ Prerequisites:
 - A SQL warehouse
 - An **existing** catalog and schema where you can create materialized views. The deploy never creates a schema.
 
-Deploy the views and dashboard in one command:
+There are three ways to deploy. Each creates the views in your existing schema and then creates the dashboard.
+
+### Option A: notebook in the workspace (no local setup)
+
+1. Add this repo to the workspace: **Workspace → Create → Git folder**, then paste the repo URL.
+2. Open `deploy_notebook` in the Git folder and attach it to serverless or any compute.
+3. Fill in the widgets: catalog, schema and warehouse ID. Then choose **Run all**.
+4. The last cell prints the published link and the new dashboard ID. Put that ID into the `dashboard_id` widget so later runs update the same dashboard.
+
+To skip the view step on a later run, for example after a dashboard-only change, set the `create_views` widget to `no`.
+
+### Option B: command line
 
 ```bash
 python3 deploy.py --profile <profile> --warehouse-id <warehouse-id> \
   --catalog <catalog> --schema <schema>
 ```
 
-The script:
-1. Checks that `<catalog>.<schema>` exists, and stops if it doesn't.
-2. Renders the SQL templates in `sql/` and the dashboard JSON into `build/`, which is git-ignored.
-3. Creates the four materialized views in dependency order. `02` scans 90 days of audit logs and takes a few minutes.
-4. Creates the dashboard in `/Workspace/Users/<you>/GenieCodeUsage` (change this with `--parent-path`) and publishes it. It then prints the dashboard ID and the published link.
-
-**Later runs:** pass the printed ID so the same dashboard is updated instead of a second copy being created:
+The script checks that the schema exists, renders the files into `build/` (git-ignored), creates the four views in dependency order, then creates the dashboard and publishes it. By default the dashboard goes in `/Workspace/Users/<you>/GenieCodeUsage`; change this with `--parent-path`. The script prints the dashboard ID and the published link. On later runs:
 
 ```bash
 python3 deploy.py ... --dashboard-id <dashboard-id>                 # update views and dashboard
 python3 deploy.py ... --dashboard-id <dashboard-id> --skip-views    # dashboard-only change
 ```
 
-You only need to re-run the view step after editing the SQL. The views refresh themselves daily.
+### Option C: by hand
 
-To render the files without deploying, run `python3 build_dashboard.py --catalog <catalog> --schema <schema>`.
+1. **Get the SQL with your names filled in.** The files in `sql/` are templates using `${catalog}` and `${schema}`, so they won't run as-is. Do one of:
+   - run steps 1–2 of `deploy_notebook`, which print the SQL
+   - run `python3 build_dashboard.py --catalog <catalog> --schema <schema>`, which writes `build/sql/*.sql`
+2. **Run the four statements in order** (`01` → `04`) in the SQL editor on a SQL warehouse.
+3. **Import the dashboard.** Generate `build/genie_code_usage_dashboard.json` with `build_dashboard.py` (above). Each dataset in it already points at your catalog and schema. In the UI: **Dashboards → Create dashboard → Import dashboard from file**. Then publish it.
+
+### After deploying
+
+`02` scans 90 days of audit logs and takes a few minutes. The views refresh themselves daily, so you only need to re-run the view step after editing the SQL.
 
 ## Access and privacy
 
