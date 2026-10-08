@@ -221,6 +221,14 @@ SELECT s.workspace_name, s.surface, count(*) AS sessions
 FROM s JOIN top_ws USING (workspace_name)
 GROUP BY ALL"""
 
+UD_TOP_USERS_SQL = """
+WITH s AS (SELECT user_email, primary_category, session_id FROM gc_sessions
+{where}),
+top_users AS (SELECT user_email FROM s GROUP BY user_email ORDER BY count(*) DESC LIMIT 20)
+SELECT s.user_email, s.primary_category, count(*) AS sessions
+FROM s JOIN top_users USING (user_email)
+GROUP BY ALL"""
+
 UD_EXTRA = [in_param("p_ud_user", "user_email")]
 datasets += [
     {"name": "ds_activity_table", "displayName": "Agent activities (flat)",
@@ -235,6 +243,8 @@ datasets += [
     {"name": "ds_ud_workspaces", "displayName": "User detail: top workspaces",
      "queryLines": ql(UD_WORKSPACES_SQL.format(where=session_where("session_date", UD_EXTRA))),
      "parameters": SESSION_PARAMS + [P_UD_USER]},
+    {"name": "ds_ud_top_users", "displayName": "User detail: top 20 users",
+     "queryLines": ql(UD_TOP_USERS_SQL.format(where=session_where("session_date"))), "parameters": SESSION_PARAMS},
 ]
 
 PCT_FMT = {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
@@ -444,12 +454,16 @@ user_detail = [
             f("sum(active_minutes)", "SUM(`active_minutes`)"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
     counter("ud_kpi_days", "Active days", "Days with any Genie Code event", "ds_users",
             f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
-    monthly_cat_bar("ud_monthly", "Monthly sessions by primary category", None, pos(0, 5, 12, 7)),
-    pie("ud_cat_mix", "Category mix", "ds_sessions", pos(0, 12, 6, 8)),
+    hbar("ud_top_users", "Top 20 users by sessions",
+         "Follows the Filters page but not this page's user picker, so it always shows the top 20. Pick a user above to drill in.",
+         "ds_ud_top_users", "user_email", f("sum(sessions)", "SUM(`sessions`)"), "Sessions", pos(0, 5, 12, 10),
+         color=cat_color(), label=False),
+    monthly_cat_bar("ud_monthly", "Monthly sessions by primary category", None, pos(0, 15, 12, 7)),
+    pie("ud_cat_mix", "Category mix", "ds_sessions", pos(0, 22, 6, 8)),
     flat_table("ud_activities", "What the agent did", "One row per activity", "ds_ud_activity",
-               [c for c in ACTIVITY_COLUMNS if c[0] != "workspaces"], pos(0, 20, 12, 9)),
+               [c for c in ACTIVITY_COLUMNS if c[0] != "workspaces"], pos(0, 30, 12, 9)),
     hbar("ud_workspaces", "Top workspaces and surfaces", "Top 10 workspaces by sessions",
-         "ds_ud_workspaces", "workspace_name", f("sum(sessions)", "SUM(`sessions`)"), "Sessions", pos(6, 12, 6, 8),
+         "ds_ud_workspaces", "workspace_name", f("sum(sessions)", "SUM(`sessions`)"), "Sessions", pos(6, 22, 6, 8),
          color={"fieldName": "surface", "scale": {"type": "categorical"}, "displayName": "Surface", "legend": LEGEND_BOTTOM},
          label=False),
     flat_table("ud_session_log", "Session log", "Every Genie Code agent session, newest first", "ds_sessions",
@@ -459,7 +473,7 @@ user_detail = [
                 ("duration_minutes", "Duration min", None), ("total_actions", "Agent actions", None),
                 ("cells_run", "Cells run", None), ("notebooks_created", "Notebooks created", None),
                 ("error_count", "Errors", None), ("session_id", "Session ID", None)],
-               pos(0, 29, 12, 9)),
+               pos(0, 39, 12, 9)),
 ]
 
 
@@ -481,8 +495,8 @@ def gfilter(name, title, wtype, fields, params, p, default=None):
     return {"widget": {"name": name, "queries": queries, "spec": spec}, "position": p}
 
 
-ALL_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_top_ws_users", "ds_ud_activity", "ds_ud_workspaces"]
-SESSION_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_ud_activity", "ds_ud_workspaces"]
+ALL_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_top_ws_users", "ds_ud_activity", "ds_ud_workspaces", "ds_ud_top_users"]
+SESSION_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_ud_activity", "ds_ud_workspaces", "ds_ud_top_users"]
 BASE3 = lambda col_users, col_sessions, col_activity: [("ds_users", col_users), ("ds_sessions", col_sessions), ("ds_activity", col_activity)]
 
 filters = [

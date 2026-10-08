@@ -51,7 +51,7 @@ All four keep the last 90 days. They refresh daily at 02:00 (01, 02), 04:00 (03)
 - **Overview:** KPIs, weekly active users, monthly sessions by category, category mix
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
-- **User Detail:** per-user KPIs, trends, activities, workspaces and a session log
+- **User Detail:** top 20 users, per-user KPIs, trends, activities, workspaces and a session log
 - **Filters:** date, workspace, user, user type, surface, primary category, client type
 
 ## Deploy
