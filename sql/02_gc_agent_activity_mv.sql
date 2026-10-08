@@ -1,7 +1,7 @@
 -- Genie Code agent activity: audit events emitted by the Genie Code agent
 -- (user agent 'databricks-background-genie ... group/<context> sid/<session>')
 -- at minute x workspace x user x session x action grain, tagged with a usage category.
-CREATE OR REPLACE MATERIALIZED VIEW serverless_stable_12edvn_catalog.genie_code_usage.gc_agent_activity
+CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_agent_activity
 SCHEDULE CRON '0 0 2 * * ?' AT TIME ZONE 'UTC'
 COMMENT 'Genie Code agent tool calls by minute/session/action with usage category (last 90 days)'
 AS

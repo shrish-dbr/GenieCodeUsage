@@ -1,5 +1,5 @@
 -- Daily Genie Code interaction events per workspace x user x client type.
-CREATE OR REPLACE MATERIALIZED VIEW serverless_stable_12edvn_catalog.genie_code_usage.gc_daily_users
+CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_daily_users
 SCHEDULE CRON '0 0 2 * * ?' AT TIME ZONE 'UTC'
 COMMENT 'Daily Genie Code events per workspace and user from system.access.assistant_events (last 90 days)'
 AS

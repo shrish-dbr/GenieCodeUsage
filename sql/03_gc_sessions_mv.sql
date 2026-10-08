@@ -4,13 +4,13 @@
 -- Primary category = signal category with the most active minutes (minutes normalise high-volume
 -- streaming notebook edits). Sessions with no signal actions are 'Q&A / Read-only'.
 -- user_type flags sessions owned by non-human identities and user-days with > 50 sessions as automated / eval.
-CREATE OR REPLACE MATERIALIZED VIEW serverless_stable_12edvn_catalog.genie_code_usage.gc_sessions
+CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_sessions
 -- Refreshes after gc_agent_activity (02:00 UTC), which it reads.
 SCHEDULE CRON '0 0 4 * * ?' AT TIME ZONE 'UTC'
 COMMENT 'Genie Code agent sessions with owner, workspace and primary usage category (last 90 days)'
 AS
 WITH act AS (
-  SELECT * FROM serverless_stable_12edvn_catalog.genie_code_usage.gc_agent_activity
+  SELECT * FROM ${catalog}.${schema}.gc_agent_activity
   WHERE session_id <> ''
 ),
 owner AS (

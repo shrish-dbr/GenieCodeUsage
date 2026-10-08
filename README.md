@@ -62,43 +62,40 @@ Prerequisites:
 - A SQL warehouse
 - A catalog where you can create a schema
 
-1. **Pick the catalog and schema.** The SQL files and `build_dashboard.py` (`CATALOG`, `SCHEMA`) use `serverless_stable_12edvn_catalog.genie_code_usage`. Replace it everywhere if yours is different.
+1. **Render the SQL and dashboard JSON** for your catalog and schema. The schema is created in step 2, and defaults to `genie_code_usage`:
+
+   ```bash
+   python3 build_dashboard.py --catalog <catalog> [--schema genie_code_usage]
+   ```
+
+   This writes `build/sql/00`–`04_*.sql` and `build/genie_code_usage_dashboard.json`. The files in `sql/` are templates that use `${catalog}` and `${schema}`; don't run them directly. `build/` is git-ignored.
 
 2. **Create the schema and views**, in order:
 
    ```bash
    export DATABRICKS_WAREHOUSE_ID=<warehouse-id>
-   databricks experimental aitools tools query --profile <profile> \
-     "CREATE SCHEMA IF NOT EXISTS <catalog>.genie_code_usage"
-   for f in sql/01_gc_daily_users_mv.sql sql/02_gc_agent_activity_mv.sql \
-            sql/03_gc_sessions_mv.sql sql/04_gc_session_activity_mv.sql; do
+   for f in build/sql/*.sql; do
      databricks experimental aitools tools query --profile <profile> --file "$f"
    done
    ```
 
    `02` scans 90 days of audit logs and takes a few minutes.
 
-3. **Generate the dashboard JSON:**
-
-   ```bash
-   python3 build_dashboard.py   # writes genie_code_usage_dashboard.json
-   ```
-
-4. **Create the dashboard and publish it.** `parent_path` must already exist; create it with `databricks workspace mkdirs <folder>` if needed.
+3. **Create the dashboard and publish it.** `parent_path` must already exist; create it with `databricks workspace mkdirs <folder>` if needed.
 
    ```bash
    databricks lakeview create --profile <profile> \
      --display-name "Genie Code Usage Patterns" \
      --warehouse-id <warehouse-id> \
-     --dataset-catalog <catalog> --dataset-schema genie_code_usage \
-     --serialized-dashboard "$(cat genie_code_usage_dashboard.json)" \
+     --dataset-catalog <catalog> --dataset-schema <schema> \
+     --serialized-dashboard "$(cat build/genie_code_usage_dashboard.json)" \
      --json '{"parent_path": "/Workspace/Users/<you>/GenieCodeUsage"}'
    databricks lakeview publish <dashboard-id> --profile <profile> --warehouse-id <warehouse-id>
    ```
 
-   To change an existing dashboard, use `databricks lakeview update <dashboard-id>` with the same `--dataset-catalog`, `--dataset-schema` and `--serialized-dashboard` flags, then `publish` again.
+   `lakeview create` returns the new dashboard's ID. Save it for later changes; running `create` again makes a second copy with a new link.
 
-   `.dashboard_id` records the ID of the deployed dashboard, so `update` and `publish` can target it instead of `create` making a new copy. No script reads it automatically. Use it in commands, for example `databricks lakeview update "$(cat .dashboard_id)" ...`. After your own `create`, replace its contents with your new ID.
+4. **To change an existing dashboard**, run step 1 again. Then run `databricks lakeview update <dashboard-id>` with the same `--dataset-catalog`, `--dataset-schema` and `--serialized-dashboard` flags, then `publish` again.
 
 ## Access and privacy
 

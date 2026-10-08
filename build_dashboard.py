@@ -1,5 +1,13 @@
-"""Generates genie_code_usage_dashboard.json (AI/BI dashboard) over the genie_code_usage MVs."""
+"""Renders the Genie Code usage SQL and AI/BI dashboard JSON for a target catalog/schema.
+
+    python3 build_dashboard.py --catalog <catalog> [--schema genie_code_usage] [--out build]
+
+Writes <out>/sql/*.sql (from the sql/ templates) and <out>/genie_code_usage_dashboard.json.
+"""
+import argparse
 import json
+import pathlib
+import string
 
 CAT_COLORS = {
     "Code Development": "#0072B2",
@@ -16,7 +24,13 @@ CAT_SCALE = {"type": "categorical",
              "mappings": [{"value": k, "color": v} for k, v in CAT_COLORS.items()]}
 
 
-CATALOG, SCHEMA = "serverless_stable_12edvn_catalog", "genie_code_usage"
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("--catalog", required=True, help="catalog that will hold the views")
+parser.add_argument("--schema", default="genie_code_usage", help="schema that will hold the views")
+parser.add_argument("--out", default="build", help="output directory")
+args = parser.parse_args()
+CATALOG, SCHEMA = args.catalog, args.schema
+OUT = pathlib.Path(args.out)
 
 
 def ql(sql):
@@ -524,6 +538,11 @@ dashboard = {
         "widgetCornerRadius": 8}},
 }
 
-with open("genie_code_usage_dashboard.json", "w") as fh:
+ROOT = pathlib.Path(__file__).parent
+(OUT / "sql").mkdir(parents=True, exist_ok=True)
+for template in sorted((ROOT / "sql").glob("*.sql")):
+    rendered = string.Template(template.read_text()).substitute(catalog=CATALOG, schema=SCHEMA)
+    (OUT / "sql" / template.name).write_text(rendered)
+with open(OUT / "genie_code_usage_dashboard.json", "w") as fh:
     json.dump(dashboard, fh, indent=2)
-print("ok")
+print(f"Wrote {OUT}/sql/*.sql and {OUT}/genie_code_usage_dashboard.json for {CATALOG}.{SCHEMA}")
