@@ -47,37 +47,52 @@ datasets = [
      "queryLines": ql(USERS_TYPED_SQL + """
 SELECT event_date, workspace_name, user_email, client_type, events, user_type
 FROM users_typed""")},
-    {"name": "ds_sessions", "displayName": "Genie Code agent sessions",
+    {"name": "ds_main", "displayName": "Genie Code sessions and activities",
+     # One row per session x category x activity (read-only sessions get one row). session_* columns are
+     # non-zero only on each session's first row, so SUM() over them counts every session exactly once.
      "queryLines": ql("""
 WITH uc AS (SELECT user_email, primary_category, count(*) AS n FROM gc_sessions
             WHERE primary_category <> 'Q&A / Read-only' GROUP BY ALL),
 ut AS (SELECT user_email, max_by(primary_category, n) AS user_top_category FROM uc GROUP BY user_email),
 uw AS (SELECT user_email, workspace_name, count(*) AS n FROM gc_sessions
        WHERE workspace_name <> 'Account-level' GROUP BY ALL),
-up AS (SELECT user_email, max_by(workspace_name, n) AS user_primary_workspace FROM uw GROUP BY user_email)
-SELECT s.session_id, s.session_date, s.session_start, s.session_end, s.workspace_name, s.user_email, s.user_type, s.surface,
-       s.primary_category, s.categories_used, coalesce(array_join(s.categories, ', '), '') AS categories_list,
-       s.active_minutes, round(s.duration_minutes, 1) AS duration_minutes,
-       s.total_actions, s.signal_actions, s.cells_run, s.notebooks_created, s.error_count,
+up AS (SELECT user_email, max_by(workspace_name, n) AS user_primary_workspace FROM uw GROUP BY user_email),
+r AS (
+  SELECT s.*, coalesce(a.category, s.primary_category) AS category,
+         coalesce(a.activity, 'Read context only') AS activity,
+         coalesce(a.actions, 0) AS actions, coalesce(a.errors, 0) AS errors,
+         row_number() OVER (PARTITION BY s.session_id ORDER BY a.category, a.activity) AS rn
+  FROM gc_sessions s
+  LEFT JOIN gc_session_activity a ON a.session_id = s.session_id
+)
+SELECT r.session_id, r.session_date, r.session_start, r.workspace_name, r.user_email, r.user_type, r.surface,
+       r.primary_category, coalesce(array_join(r.categories, ', '), '') AS categories_list,
        coalesce(ut.user_top_category, 'Q&A / Read-only') AS user_top_category,
        coalesce(up.user_primary_workspace, 'Account-level') AS user_primary_workspace,
-       CASE WHEN s.primary_category <> 'Q&A / Read-only' THEN 1 ELSE 0 END AS is_action_session,
-       date_format(s.session_start, 'E') AS day_of_week,
-       hour(s.session_start) AS hour_of_day,
-       CASE WHEN s.active_minutes <= 1 THEN '1 min' WHEN s.active_minutes <= 5 THEN '2-5 min'
-            WHEN s.active_minutes <= 15 THEN '6-15 min' WHEN s.active_minutes <= 60 THEN '16-60 min'
+       date_format(r.session_start, 'E') AS day_of_week,
+       hour(r.session_start) AS hour_of_day,
+       CASE WHEN r.active_minutes <= 1 THEN '1 min' WHEN r.active_minutes <= 5 THEN '2-5 min'
+            WHEN r.active_minutes <= 15 THEN '6-15 min' WHEN r.active_minutes <= 60 THEN '16-60 min'
             ELSE '60+ min' END AS session_length,
-       CASE WHEN s.categories_used = 0 THEN '0 (read-only)' WHEN s.categories_used = 1 THEN '1 category'
-            WHEN s.categories_used = 2 THEN '2 categories' ELSE '3+ categories' END AS categories_bucket
-FROM gc_sessions s
-LEFT JOIN ut USING (user_email)
-LEFT JOIN up USING (user_email)
-ORDER BY s.session_start DESC""")},
-    {"name": "ds_activity", "displayName": "Genie Code agent activity",
-     "queryLines": ql("""
-SELECT event_date, workspace_name, user_email, session_id, user_type, surface, primary_category,
-       category, activity, active_minutes, actions, errors
-FROM gc_session_activity""")},
+       CASE WHEN r.categories_used = 0 THEN '0 (read-only)' WHEN r.categories_used = 1 THEN '1 category'
+            WHEN r.categories_used = 2 THEN '2 categories' ELSE '3+ categories' END AS categories_bucket,
+       r.category, r.activity, r.actions, r.errors,
+       CASE WHEN r.rn = 1 THEN 1 ELSE 0 END AS session_row,
+       CASE WHEN r.rn = 1 AND r.primary_category <> 'Q&A / Read-only' THEN 1 ELSE 0 END AS session_is_action,
+       CASE WHEN r.rn = 1 THEN r.active_minutes ELSE 0 END AS session_active_minutes,
+       CASE WHEN r.rn = 1 THEN round(r.duration_minutes, 1) ELSE 0 END AS session_duration_minutes,
+       CASE WHEN r.rn = 1 THEN r.total_actions ELSE 0 END AS session_total_actions,
+       CASE WHEN r.rn = 1 THEN r.cells_run ELSE 0 END AS session_cells_run,
+       CASE WHEN r.rn = 1 THEN r.notebooks_created ELSE 0 END AS session_notebooks_created,
+       CASE WHEN r.rn = 1 THEN r.error_count ELSE 0 END AS session_errors
+FROM r
+LEFT JOIN ut ON r.user_email = ut.user_email
+LEFT JOIN up ON r.user_email = up.user_email"""),
+     "columns": [
+         {"displayName": "Action rate", "description": "Share of sessions where the agent changed or ran something",
+          "expression": "SUM(`session_is_action`) * 1.0 / NULLIF(SUM(`session_row`), 0)"},
+         {"displayName": "Error rate", "description": "Agent actions that returned an error",
+          "expression": "SUM(`errors`) * 1.0 / NULLIF(SUM(`actions`), 0)"}]},
 ]
 
 
@@ -85,8 +100,10 @@ def f(name, expr):
     return {"name": name, "expression": expr}
 
 
-def q(ds, fields, disagg=False, filters=None):
+def q(ds, fields, disagg=False, filters=None, orders=None):
     query = {"datasetName": ds, "fields": fields, "disaggregated": disagg}
+    if orders:
+        query["orders"] = [{"direction": d, "expression": e} for e, d in orders]
     if filters:
         query["filters"] = [{"expression": e} for e in filters]
     return [{"name": "main_query", "query": query}]
@@ -128,9 +145,10 @@ def counter(name, title, desc, ds, value_field, period_col, display, fmt=None, p
             "position": p}
 
 
-# ---------------- Parameterised datasets (pre-aggregated flat tables / top-N bars) ----------------
-# These aggregate inside SQL, so the Filters page binds to them through parameters
-# instead of field filters (a field filter would only apply after aggregation).
+# ---------------- Parameterised datasets (top-N bars only) ----------------
+# A widget can't limit itself to the top N, so these two aggregate + LIMIT inside SQL and the filters bind
+# to them through parameters (a field filter would only apply after aggregation). They can't take part in
+# click-to-cross-filter, which only works between widgets on the same dataset; everything else uses ds_main.
 NO_DATE = {"min": {"value": "2000-01-01"}, "max": {"value": "2099-12-31"}}
 
 
@@ -161,46 +179,6 @@ def session_where(date_col, extra=()):
 
 SESSION_PARAMS = [DATE_PARAM, P_WS, P_USER, P_TYPE, P_SURFACE, P_CAT]
 
-ACTIVITY_TABLE_SQL = """
-SELECT category, activity,
-       count(DISTINCT session_id) AS sessions,
-       count(DISTINCT user_email) AS users,
-       count(DISTINCT workspace_name) AS workspaces,
-       sum(actions) AS agent_actions,
-       sum(errors) AS errors,
-       try_divide(sum(errors), sum(actions)) AS error_rate
-FROM gc_session_activity
-{where}
-GROUP BY category, activity
-ORDER BY sessions DESC"""
-
-USER_DIRECTORY_SQL = """
-WITH uc AS (SELECT user_email, primary_category, count(*) AS n FROM gc_sessions
-            WHERE primary_category <> 'Q&A / Read-only' GROUP BY ALL),
-ut AS (SELECT user_email, max_by(primary_category, n) AS top_category FROM uc GROUP BY user_email),
-uw AS (SELECT user_email, workspace_name, count(*) AS n FROM gc_sessions
-       WHERE workspace_name <> 'Account-level' GROUP BY ALL),
-up AS (SELECT user_email, max_by(workspace_name, n) AS primary_workspace FROM uw GROUP BY user_email),
-s AS (SELECT * FROM gc_sessions
-{where})
-SELECT s.user_email,
-       coalesce(ut.top_category, 'Q&A / Read-only') AS top_category,
-       coalesce(up.primary_workspace, 'Account-level') AS primary_workspace,
-       count(*) AS sessions,
-       avg(CASE WHEN s.primary_category <> 'Q&A / Read-only' THEN 1 ELSE 0 END) AS action_rate,
-       count(DISTINCT s.session_date) AS active_days,
-       min(s.session_date) AS first_seen,
-       max(s.session_date) AS last_seen,
-       sum(s.active_minutes) AS active_minutes,
-       sum(s.cells_run) AS cells_run,
-       sum(s.notebooks_created) AS notebooks_created,
-       count(DISTINCT s.workspace_name) AS workspaces
-FROM s
-LEFT JOIN ut ON s.user_email = ut.user_email
-LEFT JOIN up ON s.user_email = up.user_email
-GROUP BY ALL
-ORDER BY sessions DESC"""
-
 TOP_WS_USERS_SQL = USERS_TYPED_SQL + """
 SELECT workspace_name, count(DISTINCT user_email) AS users
 FROM users_typed
@@ -213,14 +191,6 @@ GROUP BY workspace_name
 ORDER BY users DESC
 LIMIT 15"""
 
-UD_WORKSPACES_SQL = """
-WITH s AS (SELECT workspace_name, surface, session_id FROM gc_sessions
-{where}),
-top_ws AS (SELECT workspace_name FROM s GROUP BY workspace_name ORDER BY count(*) DESC LIMIT 10)
-SELECT s.workspace_name, s.surface, count(*) AS sessions
-FROM s JOIN top_ws USING (workspace_name)
-GROUP BY ALL"""
-
 UD_TOP_USERS_SQL = """
 WITH s AS (SELECT user_email, primary_category, session_id FROM gc_sessions
 {where}),
@@ -231,20 +201,11 @@ GROUP BY ALL"""
 
 UD_EXTRA = [in_param("p_ud_user", "user_email")]
 datasets += [
-    {"name": "ds_activity_table", "displayName": "Agent activities (flat)",
-     "queryLines": ql(ACTIVITY_TABLE_SQL.format(where=session_where("event_date"))), "parameters": SESSION_PARAMS},
-    {"name": "ds_user_directory", "displayName": "User directory (flat)",
-     "queryLines": ql(USER_DIRECTORY_SQL.format(where=session_where("session_date"))), "parameters": SESSION_PARAMS},
     {"name": "ds_top_ws_users", "displayName": "Top workspaces by users",
      "queryLines": ql(TOP_WS_USERS_SQL), "parameters": [DATE_PARAM, P_WS, P_USER, P_TYPE, P_CLIENT]},
-    {"name": "ds_ud_activity", "displayName": "User detail: activities",
-     "queryLines": ql(ACTIVITY_TABLE_SQL.format(where=session_where("event_date", UD_EXTRA))),
-     "parameters": SESSION_PARAMS + [P_UD_USER]},
-    {"name": "ds_ud_workspaces", "displayName": "User detail: top workspaces",
-     "queryLines": ql(UD_WORKSPACES_SQL.format(where=session_where("session_date", UD_EXTRA))),
-     "parameters": SESSION_PARAMS + [P_UD_USER]},
     {"name": "ds_ud_top_users", "displayName": "User detail: top 20 users",
-     "queryLines": ql(UD_TOP_USERS_SQL.format(where=session_where("session_date"))), "parameters": SESSION_PARAMS},
+     "queryLines": ql(UD_TOP_USERS_SQL.format(where=session_where("session_date", UD_EXTRA))),
+     "parameters": SESSION_PARAMS + [P_UD_USER]},
 ]
 
 PCT_FMT = {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
@@ -257,16 +218,16 @@ def cat_color(field="primary_category", display="Primary category", legend=True)
     return enc
 
 
-def flat_table(name, title, desc, ds, columns, p):
-    """columns: list of (field, display, format-or-None)."""
+def agg_table(name, title, desc, ds, columns, p, orders=None):
+    """Table over a shared dataset. columns: (field, display, format-or-None); field is a {name, expression}
+    dict. Aggregated fields group the rows by the plain ones, so the table cross-filters with the page."""
     cols = []
     for field, display, fmt in columns:
-        c = {"fieldName": field, "displayName": display}
+        c = {"fieldName": field["name"], "displayName": display}
         if fmt:
             c["format"] = fmt
         cols.append(c)
-    return {"widget": {"name": name,
-                       "queries": q(ds, [f(c[0], f"`{c[0]}`") for c in columns], disagg=True),
+    return {"widget": {"name": name, "queries": q(ds, [c[0] for c in columns], orders=orders),
                        "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": cols},
                                 "frame": frame(title, desc)}},
             "position": p}
@@ -290,6 +251,11 @@ def hbar(name, title, desc, ds, cat_field, val_field, val_display, p, color=None
 
 SESSIONS = f("countdistinct(session_id)", "COUNT(DISTINCT `session_id`)")
 USERS = f("countdistinct(user_email)", "COUNT(DISTINCT `user_email`)")
+WORKSPACES = f("countdistinct(workspace_name)", "COUNT(DISTINCT `workspace_name`)")
+ACTION_RATE = f("measure(Action rate)", "MEASURE(`Action rate`)")
+ERROR_RATE = f("measure(Error rate)", "MEASURE(`Error rate`)")
+col = lambda c: f(c, f"`{c}`")
+total = lambda c: f(f"sum({c})", f"SUM(`{c}`)")
 
 
 def pie(name, title, ds, p):
@@ -305,7 +271,7 @@ def pie(name, title, ds, p):
 
 def monthly_cat_bar(name, title, desc, p):
     return {"widget": {"name": name,
-                       "queries": q("ds_sessions", [MONTH("session_date"), f("primary_category", "`primary_category`"), SESSIONS]),
+                       "queries": q("ds_main", [MONTH("session_date"), f("primary_category", "`primary_category`"), SESSIONS]),
                        "spec": {"version": 3, "widgetType": "bar",
                                 "encodings": {
                                     "x": {"fieldName": "monthly(session_date)", "scale": {"type": "temporal"}, "displayName": "Month"},
@@ -315,10 +281,11 @@ def monthly_cat_bar(name, title, desc, p):
             "position": p}
 
 
-ACTIVITY_COLUMNS = [("category", "Category", None), ("activity", "Activity", None),
-                    ("sessions", "Sessions", None), ("users", "Users", None), ("workspaces", "Workspaces", None),
-                    ("agent_actions", "Agent actions", None), ("errors", "Errors", None),
-                    ("error_rate", "Error rate", PCT_FMT)]
+ACTIVITY_COLUMNS = [(col("category"), "Category", None), (col("activity"), "Activity", None),
+                    (SESSIONS, "Sessions", None), (USERS, "Users", None), (WORKSPACES, "Workspaces", None),
+                    (total("actions"), "Agent actions", None), (total("errors"), "Errors", None),
+                    (ERROR_RATE, "Error rate", PCT_FMT)]
+BY_SESSIONS = [(SESSIONS["expression"], "DESC")]
 
 # ---------------- Overview page ----------------
 overview = [
@@ -336,9 +303,9 @@ overview = [
             "ds_users", f("countdistinct(workspace_name)", "COUNT(DISTINCT `workspace_name`)"), "event_date",
             "Workspaces", COUNT_FMT, pos(3, 3, 3, 3)),
     counter("kpi_sessions", "Agent sessions", "Genie Code agent sessions (sid)",
-            "ds_sessions", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(6, 3, 3, 3)),
+            "ds_main", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(6, 3, 3, 3)),
     counter("kpi_action_rate", "Sessions that took action", "Share of sessions where the agent changed or ran something (vs read-only Q&A)",
-            "ds_sessions", f("avg(is_action_session)", "AVG(`is_action_session`)"), "session_date",
+            "ds_main", ACTION_RATE, "session_date",
             "Action rate", PCT_FMT, pos(9, 3, 3, 3)),
     {"widget": {"name": "wau_by_client",
                 "queries": q("ds_users", [WEEK("event_date"), f("client_type", "`client_type`"), USERS]),
@@ -352,12 +319,12 @@ overview = [
      "position": pos(0, 13, 6, 7)},
     monthly_cat_bar("monthly_sessions_by_cat", "Monthly agent sessions by primary category",
                    "Primary category = what the agent spent the most active minutes on", pos(0, 6, 12, 7)),
-    pie("pie_primary_cat", "Session mix by primary category", "ds_sessions", pos(0, 20, 6, 8)),
+    pie("pie_primary_cat", "Session mix by primary category", "ds_main", pos(0, 20, 6, 8)),
     hbar("sessions_touching_cat", "Sessions using each category", "A session can span several categories",
-         "ds_activity", "category", SESSIONS, "Sessions", pos(6, 13, 6, 7),
+         "ds_main", "category", SESSIONS, "Sessions", pos(6, 13, 6, 7),
          color=cat_color("category", "Category", legend=False)),
     hbar("users_per_cat", "Users by category", "Distinct users whose agent sessions touched each category",
-         "ds_activity", "category", USERS, "Users", pos(6, 20, 6, 8),
+         "ds_main", "category", USERS, "Users", pos(6, 20, 6, 8),
          color=cat_color("category", "Category", legend=False)),
 ]
 
@@ -368,7 +335,7 @@ patterns = [
                        "When and where Genie Code is used, how deep sessions go, and the specific agent activities behind each category. Times are UTC."],
          pos(0, 0, 12, 2)),
     {"widget": {"name": "heat_dow_hour",
-                "queries": q("ds_sessions", [f("hour_of_day", "`hour_of_day`"), f("day_of_week", "`day_of_week`"), SESSIONS]),
+                "queries": q("ds_main", [f("hour_of_day", "`hour_of_day`"), f("day_of_week", "`day_of_week`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "heatmap",
                          "encodings": {
                              "x": {"fieldName": "hour_of_day", "scale": {"type": "categorical"}, "displayName": "Hour (UTC)"},
@@ -378,7 +345,7 @@ patterns = [
                          "frame": frame("When sessions happen (day x hour, UTC)")}},
      "position": pos(0, 2, 6, 7)},
     {"widget": {"name": "cat_by_surface",
-                "queries": q("ds_sessions", [f("surface", "`surface`"), f("primary_category", "`primary_category`"), SESSIONS]),
+                "queries": q("ds_main", [f("surface", "`surface`"), f("primary_category", "`primary_category`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "bar",
                          "encodings": {
                              "x": {"fieldName": SESSIONS["name"], "scale": {"type": "quantitative"}, "displayName": "Share of sessions"},
@@ -388,7 +355,7 @@ patterns = [
                          "frame": frame("Category mix by surface", "Where Genie Code was invoked: side panel, embedded, document, visualization")}},
      "position": pos(0, 9, 12, 6)},
     {"widget": {"name": "length_by_cat",
-                "queries": q("ds_sessions", [f("session_length", "`session_length`"), f("primary_category", "`primary_category`"), SESSIONS]),
+                "queries": q("ds_main", [f("session_length", "`session_length`"), f("primary_category", "`primary_category`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "bar",
                          "encodings": {
                              "x": {"fieldName": "session_length", "scale": {"type": "categorical", "sort": {"by": "custom-order", "orderedValues": ["1 min", "2-5 min", "6-15 min", "16-60 min", "60+ min"]}}, "displayName": "Active minutes in session"},
@@ -397,7 +364,7 @@ patterns = [
                          "frame": frame("Session depth (active minutes)")}},
      "position": pos(0, 15, 12, 7)},
     {"widget": {"name": "cats_per_session",
-                "queries": q("ds_sessions", [f("categories_bucket", "`categories_bucket`"), SESSIONS]),
+                "queries": q("ds_main", [f("categories_bucket", "`categories_bucket`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "bar",
                          "encodings": {
                              "x": {"fieldName": "categories_bucket", "scale": {"type": "categorical", "sort": {"by": "custom-order", "orderedValues": ["0 (read-only)", "1 category", "2 categories", "3+ categories"]}}, "displayName": "Categories used in session"},
@@ -405,9 +372,9 @@ patterns = [
                              "label": {"show": True}},
                          "frame": frame("Multi-category sessions", "E.g. explore catalog, then write code, then build a dashboard")}},
      "position": pos(6, 2, 6, 7)},
-    flat_table("top_activities", "Agent activities by category",
-               "What Genie Code actually did: edits, cell runs, catalog lookups, dashboard builds, MCP tool calls. One row per activity; sort by any column.",
-               "ds_activity_table", ACTIVITY_COLUMNS, pos(0, 22, 12, 10)),
+    agg_table("top_activities", "Agent activities by category",
+              "What Genie Code actually did: edits, cell runs, catalog lookups, dashboard builds, MCP tool calls. One row per activity; sort by any column.",
+              "ds_main", ACTIVITY_COLUMNS, pos(0, 22, 12, 10), orders=BY_SESSIONS),
 ]
 
 # ---------------- Workspaces & users page ----------------
@@ -416,7 +383,7 @@ people = [
                        "Which workspaces and people use Genie Code most, and for what. 'Account-level' = sessions with no workspace-scoped actions."],
          pos(0, 0, 12, 2)),
     {"widget": {"name": "ws_by_cat",
-                "queries": q("ds_sessions", [f("workspace_name", "`workspace_name`"), f("primary_category", "`primary_category`"), SESSIONS]),
+                "queries": q("ds_main", [f("workspace_name", "`workspace_name`"), f("primary_category", "`primary_category`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "pivot",
                          "encodings": {
                              "rows": [{"fieldName": "workspace_name", "displayName": "Workspace",
@@ -426,16 +393,18 @@ people = [
                                  {"fieldName": SESSIONS["name"], "displayName": "Sessions", "cellType": "color-scale"}]}},
                          "frame": frame("Sessions by workspace and primary category")}},
      "position": pos(0, 2, 12, 9)},
-    flat_table("user_directory", "User directory",
-               "One row per user. Top category and primary workspace cover the full 90 days; other columns follow the filters. Use the User Detail page to drill into one user.",
-               "ds_user_directory",
-               [("user_email", "User", None), ("top_category", "Top category", None),
-                ("primary_workspace", "Primary workspace", None), ("sessions", "Sessions", None),
-                ("action_rate", "Action rate", PCT_FMT), ("active_days", "Active days", None),
-                ("first_seen", "First seen", None), ("last_seen", "Last seen", None),
-                ("active_minutes", "Active min", None), ("cells_run", "Cells run", None),
-                ("notebooks_created", "Notebooks created", None), ("workspaces", "Workspaces", None)],
-               pos(0, 11, 12, 10)),
+    agg_table("user_directory", "User directory",
+              "One row per user. Top category and primary workspace cover the full 90 days; other columns follow the filters. Use the User Detail page to drill into one user.",
+              "ds_main",
+              [(col("user_email"), "User", None), (col("user_top_category"), "Top category", None),
+               (col("user_primary_workspace"), "Primary workspace", None), (SESSIONS, "Sessions", None),
+               (ACTION_RATE, "Action rate", PCT_FMT),
+               (f("countdistinct(session_date)", "COUNT(DISTINCT `session_date`)"), "Active days", None),
+               (f("min(session_date)", "MIN(`session_date`)"), "First seen", None),
+               (f("max(session_date)", "MAX(`session_date`)"), "Last seen", None),
+               (total("session_active_minutes"), "Active min", None), (total("session_cells_run"), "Cells run", None),
+               (total("session_notebooks_created"), "Notebooks created", None), (WORKSPACES, "Workspaces", None)],
+              pos(0, 11, 12, 10), orders=BY_SESSIONS),
     hbar("ws_users_bar", "Top 15 workspaces by active users", "All Genie Code clients",
          "ds_top_ws_users", "workspace_name", f("sum(users)", "SUM(`users`)"), "Users", pos(0, 21, 12, 8)),
 ]
@@ -447,33 +416,33 @@ user_detail = [
                        "and a log of every agent session. With no user selected, the page shows everyone."],
          pos(0, 0, 8, 2)),
     None,  # page-level user filter, filled in below once gfilter exists
-    counter("ud_kpi_sessions", "Agent sessions", None, "ds_sessions", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(0, 2, 3, 3)),
-    counter("ud_kpi_action", "Sessions that took action", None, "ds_sessions",
-            f("avg(is_action_session)", "AVG(`is_action_session`)"), "session_date", "Action rate", PCT_FMT, pos(3, 2, 3, 3)),
-    counter("ud_kpi_minutes", "Active agent minutes", None, "ds_sessions",
-            f("sum(active_minutes)", "SUM(`active_minutes`)"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
+    counter("ud_kpi_sessions", "Agent sessions", None, "ds_main", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(0, 2, 3, 3)),
+    counter("ud_kpi_action", "Sessions that took action", None, "ds_main",
+            ACTION_RATE, "session_date", "Action rate", PCT_FMT, pos(3, 2, 3, 3)),
+    counter("ud_kpi_minutes", "Active agent minutes", None, "ds_main",
+            total("session_active_minutes"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
     counter("ud_kpi_days", "Active days", "Days with any Genie Code event", "ds_users",
             f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
     hbar("ud_top_users", "Top 20 users by sessions",
-         "Follows the Filters page but not this page's user picker, so it always shows the top 20. Pick a user above to drill in.",
+         "Follows every filter, including the user picker. Clicks here don't cross-filter other visuals (it ranks in its own query).",
          "ds_ud_top_users", "user_email", f("sum(sessions)", "SUM(`sessions`)"), "Sessions", pos(0, 5, 12, 10),
          color=cat_color(), label=False),
     monthly_cat_bar("ud_monthly", "Monthly sessions by primary category", None, pos(0, 15, 12, 7)),
-    pie("ud_cat_mix", "Category mix", "ds_sessions", pos(0, 22, 6, 8)),
-    flat_table("ud_activities", "What the agent did", "One row per activity", "ds_ud_activity",
-               [c for c in ACTIVITY_COLUMNS if c[0] != "workspaces"], pos(0, 30, 12, 9)),
-    hbar("ud_workspaces", "Top workspaces and surfaces", "Top 10 workspaces by sessions",
-         "ds_ud_workspaces", "workspace_name", f("sum(sessions)", "SUM(`sessions`)"), "Sessions", pos(6, 22, 6, 8),
-         color={"fieldName": "surface", "scale": {"type": "categorical"}, "displayName": "Surface", "legend": LEGEND_BOTTOM},
-         label=False),
-    flat_table("ud_session_log", "Session log", "Every Genie Code agent session, newest first", "ds_sessions",
-               [("session_start", "Started (UTC)", None), ("user_email", "User", None), ("workspace_name", "Workspace", None),
-                ("surface", "Surface", None), ("primary_category", "Primary category", None),
-                ("categories_list", "All categories", None), ("active_minutes", "Active min", None),
-                ("duration_minutes", "Duration min", None), ("total_actions", "Agent actions", None),
-                ("cells_run", "Cells run", None), ("notebooks_created", "Notebooks created", None),
-                ("error_count", "Errors", None), ("session_id", "Session ID", None)],
-               pos(0, 39, 12, 9)),
+    pie("ud_cat_mix", "Category mix", "ds_main", pos(0, 22, 6, 8)),
+    agg_table("ud_activities", "What the agent did", "One row per activity", "ds_main",
+              [c for c in ACTIVITY_COLUMNS if c[0] is not WORKSPACES], pos(0, 30, 12, 9), orders=BY_SESSIONS),
+    agg_table("ud_workspaces", "Workspaces and surfaces used", "Sessions per workspace and surface", "ds_main",
+              [(col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None), (SESSIONS, "Sessions", None)],
+              pos(6, 22, 6, 8), orders=BY_SESSIONS),
+    agg_table("ud_session_log", "Session log", "Every Genie Code agent session, newest first", "ds_main",
+              [(col("session_start"), "Started (UTC)", None), (col("user_email"), "User", None),
+               (col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None),
+               (col("primary_category"), "Primary category", None), (col("categories_list"), "All categories", None),
+               (total("session_active_minutes"), "Active min", None), (total("session_duration_minutes"), "Duration min", None),
+               (total("session_total_actions"), "Agent actions", None), (total("session_cells_run"), "Cells run", None),
+               (total("session_notebooks_created"), "Notebooks created", None), (total("session_errors"), "Errors", None),
+               (col("session_id"), "Session ID", None)],
+              pos(0, 39, 12, 9), orders=[("`session_start`", "DESC")]),
 ]
 
 
@@ -495,30 +464,30 @@ def gfilter(name, title, wtype, fields, params, p, default=None):
     return {"widget": {"name": name, "queries": queries, "spec": spec}, "position": p}
 
 
-ALL_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_top_ws_users", "ds_ud_activity", "ds_ud_workspaces", "ds_ud_top_users"]
-SESSION_PARAM_DS = ["ds_activity_table", "ds_user_directory", "ds_ud_activity", "ds_ud_workspaces", "ds_ud_top_users"]
-BASE3 = lambda col_users, col_sessions, col_activity: [("ds_users", col_users), ("ds_sessions", col_sessions), ("ds_activity", col_activity)]
+ALL_PARAM_DS = ["ds_top_ws_users", "ds_ud_top_users"]
+SESSION_PARAM_DS = ["ds_ud_top_users"]
+BASE2 = lambda col_users, col_main: [("ds_users", col_users), ("ds_main", col_main)]
 
 filters = [
-    gfilter("f_date", "Date", "filter-date-range-picker", BASE3("event_date", "session_date", "event_date"),
+    gfilter("f_date", "Date", "filter-date-range-picker", BASE2("event_date", "session_date"),
             [(d, "date_range") for d in ALL_PARAM_DS], pos(0, 0, 4, 2)),
-    gfilter("f_workspace", "Workspace", "filter-multi-select", BASE3("workspace_name", "workspace_name", "workspace_name"),
+    gfilter("f_workspace", "Workspace", "filter-multi-select", BASE2("workspace_name", "workspace_name"),
             [(d, "p_workspace") for d in ALL_PARAM_DS], pos(0, 2, 4, 2)),
-    gfilter("f_user", "User", "filter-multi-select", BASE3("user_email", "user_email", "user_email"),
+    gfilter("f_user", "User", "filter-multi-select", BASE2("user_email", "user_email"),
             [(d, "p_user") for d in ALL_PARAM_DS], pos(0, 4, 4, 2)),
-    gfilter("f_user_type", "User type", "filter-multi-select", BASE3("user_type", "user_type", "user_type"),
+    gfilter("f_user_type", "User type", "filter-multi-select", BASE2("user_type", "user_type"),
             [(d, "p_user_type") for d in ALL_PARAM_DS], pos(0, 6, 4, 2), default=["Human"]),
-    gfilter("f_surface", "Surface", "filter-multi-select", [("ds_sessions", "surface"), ("ds_activity", "surface")],
+    gfilter("f_surface", "Surface", "filter-multi-select", [("ds_main", "surface")],
             [(d, "p_surface") for d in SESSION_PARAM_DS], pos(0, 8, 4, 2)),
     gfilter("f_category", "Primary category", "filter-multi-select",
-            [("ds_sessions", "primary_category"), ("ds_activity", "primary_category")],
+            [("ds_main", "primary_category")],
             [(d, "p_category") for d in SESSION_PARAM_DS], pos(0, 10, 4, 2)),
     gfilter("f_client", "Client type (users)", "filter-multi-select", [("ds_users", "client_type")],
             [("ds_top_ws_users", "p_client")], pos(0, 12, 4, 2)),
 ]
 user_detail[1] = gfilter("ud_user", "User(s)", "filter-multi-select",
-                         BASE3("user_email", "user_email", "user_email"),
-                         [("ds_ud_activity", "p_ud_user"), ("ds_ud_workspaces", "p_ud_user")], pos(8, 0, 4, 2))
+                         BASE2("user_email", "user_email"),
+                         [("ds_ud_top_users", "p_ud_user")], pos(8, 0, 4, 2))
 
 
 def page(name, display, layout, ptype="PAGE_TYPE_CANVAS"):
