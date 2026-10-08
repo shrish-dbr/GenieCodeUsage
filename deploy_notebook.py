@@ -29,6 +29,7 @@ dbutils.widgets.dropdown("create_views", "yes", ["yes", "no"], "6. Create views"
 
 # COMMAND ----------
 
+import importlib
 import json
 import os
 import sys
@@ -39,6 +40,7 @@ from databricks.sdk.errors import NotFound
 
 sys.path.insert(0, os.getcwd())  # Git folder root, so build_dashboard can be imported
 import build_dashboard
+importlib.reload(build_dashboard)  # pick up a freshly pulled build_dashboard.py in an already-attached session
 
 catalog = dbutils.widgets.get("catalog").strip()
 schema = dbutils.widgets.get("schema").strip()
