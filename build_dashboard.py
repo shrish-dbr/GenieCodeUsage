@@ -109,6 +109,7 @@ def text(name, lines, p):
 
 COUNT_FMT = {"type": "number", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 1}}
 WEEK = lambda col: f(f"weekly({col})", f'DATE_TRUNC("WEEK", `{col}`)')
+MONTH = lambda col: f(f"monthly({col})", f'DATE_TRUNC("MONTH", `{col}`)')
 
 
 def counter(name, title, desc, ds, value_field, period_col, display, fmt=None, p=None, filters=None):
@@ -292,12 +293,12 @@ def pie(name, title, ds, p):
             "position": p}
 
 
-def weekly_cat_bar(name, title, desc, p):
+def monthly_cat_bar(name, title, desc, p):
     return {"widget": {"name": name,
-                       "queries": q("ds_sessions", [WEEK("session_date"), f("primary_category", "`primary_category`"), SESSIONS]),
+                       "queries": q("ds_sessions", [MONTH("session_date"), f("primary_category", "`primary_category`"), SESSIONS]),
                        "spec": {"version": 3, "widgetType": "bar",
                                 "encodings": {
-                                    "x": {"fieldName": "weekly(session_date)", "scale": {"type": "temporal"}, "displayName": "Week"},
+                                    "x": {"fieldName": "monthly(session_date)", "scale": {"type": "temporal"}, "displayName": "Month"},
                                     "y": {"fieldName": SESSIONS["name"], "scale": {"type": "quantitative"}, "displayName": "Sessions"},
                                     "color": cat_color()},
                                 "frame": frame(title, desc)}},
@@ -339,7 +340,7 @@ overview = [
                                        "legend": LEGEND_BOTTOM}},
                          "frame": frame("Weekly active users by client", "From system.access.assistant_events")}},
      "position": pos(0, 13, 6, 7)},
-    weekly_cat_bar("weekly_sessions_by_cat", "Weekly agent sessions by primary category",
+    monthly_cat_bar("monthly_sessions_by_cat", "Monthly agent sessions by primary category",
                    "Primary category = what the agent spent the most active minutes on", pos(0, 6, 12, 7)),
     pie("pie_primary_cat", "Session mix by primary category", "ds_sessions", pos(0, 20, 6, 8)),
     hbar("sessions_touching_cat", "Sessions using each category", "A session can span several categories",
@@ -443,7 +444,7 @@ user_detail = [
             f("sum(active_minutes)", "SUM(`active_minutes`)"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
     counter("ud_kpi_days", "Active days", "Days with any Genie Code event", "ds_users",
             f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
-    weekly_cat_bar("ud_weekly", "Weekly sessions by primary category", None, pos(0, 5, 12, 7)),
+    monthly_cat_bar("ud_monthly", "Monthly sessions by primary category", None, pos(0, 5, 12, 7)),
     pie("ud_cat_mix", "Category mix", "ds_sessions", pos(0, 12, 6, 8)),
     flat_table("ud_activities", "What the agent did", "One row per activity", "ds_ud_activity",
                [c for c in ACTIVITY_COLUMNS if c[0] != "workspaces"], pos(0, 20, 12, 9)),

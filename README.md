@@ -48,7 +48,7 @@ All four keep the last 90 days. They refresh daily at 02:00 (01, 02), 04:00 (03)
 
 ### Dashboard pages
 
-- **Overview:** KPIs, weekly active users, weekly sessions by category, category mix
+- **Overview:** KPIs, weekly active users, monthly sessions by category, category mix
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
 - **User Detail:** per-user KPIs, trends, activities, workspaces and a session log
