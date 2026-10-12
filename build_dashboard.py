@@ -378,8 +378,8 @@ people = [
 user_detail = [
     text("ud_header", ["## User detail\n", "\n",
                        "Pick one or more users (top right) for a profile: activity totals, where they use Genie Code, "
-                       "and a log of every agent session. With no user selected, the page shows everyone. "
-                       "Trends and category mix for the same users are on the other pages via the *User* filter."],
+                       "what they use it for, and a log of every agent session. With no user selected, the page shows everyone. "
+                       "Trends for the same users are on the other pages via the *User* filter."],
          pos(0, 0, 8, 2)),
     None,  # page-level user filter, filled in below once gfilter exists
     counter("ud_kpi_sessions", "Agent sessions", None, "ds_main", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(0, 2, 3, 3)),
@@ -389,9 +389,18 @@ user_detail = [
             total("session_active_minutes"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
     counter("ud_kpi_days", "Active days", "Days with any Genie Code event", "ds_users",
             f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
+    {"widget": {"name": "ud_cat_mix",
+                "queries": q("ds_main", [f("primary_category", "`primary_category`"), SESSIONS]),
+                "spec": {"version": 3, "widgetType": "pie",
+                         "encodings": {
+                             "angle": {"fieldName": SESSIONS["name"], "scale": {"type": "quantitative"}, "displayName": "Sessions"},
+                             "color": cat_color(),
+                             "label": {"show": True}},
+                         "frame": frame("Category mix", "Sessions by primary category")}},
+     "position": pos(0, 5, 6, 8)},
     agg_table("ud_workspaces", "Workspaces and surfaces used", "Sessions per workspace and surface", "ds_main",
               [(col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None), (SESSIONS, "Sessions", None)],
-              pos(0, 5, 12, 6), orders=BY_SESSIONS),
+              pos(6, 5, 6, 8), orders=BY_SESSIONS),
     agg_table("ud_session_log", "Session log", "Every Genie Code agent session, newest first", "ds_main",
               [(col("session_start"), "Started (UTC)", None), (col("user_email"), "User", None),
                (col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None),
@@ -400,7 +409,7 @@ user_detail = [
                (total("session_total_actions"), "Agent actions", None), (total("session_cells_run"), "Cells run", None),
                (total("session_notebooks_created"), "Notebooks created", None), (total("session_errors"), "Errors", None),
                (col("session_id"), "Session ID", None)],
-              pos(0, 11, 12, 12), orders=[("`session_start`", "DESC")]),
+              pos(0, 13, 12, 12), orders=[("`session_start`", "DESC")]),
 ]
 
 

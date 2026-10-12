@@ -329,7 +329,7 @@ User directory columns:
 
 ### User Detail: one person's profile
 
-Pick one or more users with the **User(s)** picker at the top right. With nobody selected, the page shows everyone. To see trends and category mix for the same users, use the *User* filter on the Filters page; it applies to every page.
+Pick one or more users with the **User(s)** picker at the top right. With nobody selected, the page shows everyone. To see trends for the same users, use the *User* filter on the Filters page; it applies to every page.
 
 | Visual | Shows | Dataset |
 |---|---|---|
@@ -337,6 +337,7 @@ Pick one or more users with the **User(s)** picker at the top right. With nobody
 | **Sessions that took action** (KPI) | Action rate | `ds_main` |
 | **Active agent minutes** (KPI) | Sum of session active minutes | `ds_main` |
 | **Active days** (KPI) | Days with any Genie Code event | `ds_users` |
+| **Category mix** | Donut: the picked users' sessions by primary category. Clicking a slice filters the page to that category. | `ds_main` |
 | **Workspaces and surfaces used** | Sessions per workspace × surface | `ds_main` |
 | **Session log** | Every session, newest first, with the columns below | `ds_main` |
 

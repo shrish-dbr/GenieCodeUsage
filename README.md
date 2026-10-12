@@ -53,7 +53,7 @@ All four cover as much history as the system tables retain (`02` reads audit eve
 - **Overview:** KPIs, monthly sessions by category, monthly active users, a category summary table (primary vs. any sessions, users, actions, error rate)
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
-- **User Detail:** a profile for the picked users: KPIs, workspaces and surfaces, and a session log
+- **User Detail:** a profile for the picked users: KPIs, a category-mix donut, workspaces and surfaces, and a session log
 - **Filters:** date, workspace, user, user type, surface, primary category, client type
 
 ### Filters and cross-filtering
