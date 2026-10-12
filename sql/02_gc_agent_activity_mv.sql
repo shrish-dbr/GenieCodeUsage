@@ -21,7 +21,10 @@ WITH src AS (
     a.request_params.fully_qualified_name AS mcp_server,
     a.response.status_code AS status_code
   FROM system.access.audit a
-  WHERE a.user_agent LIKE 'databricks-background-genie%'
+  -- Fixed floor so the scan prunes partitions: Genie Code agent events don't exist before mid-2026.
+  -- Constant (not current_date()) so it never drops history the system table still retains.
+  WHERE a.event_date >= '2026-07-01'
+    AND a.user_agent LIKE 'databricks-background-genie%'
     AND a.action_name <> 'submitCommand'
 ),
 classified AS (
