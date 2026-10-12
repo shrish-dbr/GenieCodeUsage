@@ -3,7 +3,7 @@
 CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_session_activity
 -- Refreshes after gc_agent_activity (02:00 UTC) and gc_sessions (04:00 UTC), which it reads.
 SCHEDULE CRON '0 0 6 * * ?' AT TIME ZONE 'UTC'
-COMMENT 'Genie Code agent activity by session, category and activity (last 90 days)'
+COMMENT 'Genie Code agent activity by session, category and activity (all retained history)'
 AS
 SELECT
   s.session_date AS event_date,

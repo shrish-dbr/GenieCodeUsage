@@ -62,6 +62,18 @@ except NotFound:
 w.warehouses.get(warehouse_id)
 print(f"Target: {catalog}.{schema}, warehouse {warehouse_id}")
 
+if dashboard_id:
+    # Check before the views are rebuilt, so a wrong ID fails here rather than in Step 4.
+    try:
+        existing = w.api_client.do("GET", f"/api/2.0/lakeview/dashboards/{dashboard_id}")
+    except NotFound:
+        raise ValueError(f"Dashboard {dashboard_id} was not found in this workspace. Check the ID (dashboard IDs are "
+                         "per workspace), or clear the dashboard_id widget to create a new dashboard.")
+    if existing.get("lifecycle_state") == "TRASHED":
+        raise ValueError(f"Dashboard {dashboard_id} is in the trash. Restore it, or clear the dashboard_id widget "
+                         "to create a new dashboard.")
+    print(f"Will update dashboard {dashboard_id}: {existing.get('path')}")
+
 # COMMAND ----------
 
 # MAGIC %md ## Step 2: Render the SQL
@@ -76,7 +88,7 @@ for name, sql in statements:
 # COMMAND ----------
 
 # MAGIC %md ## Step 3: Create the views
-# MAGIC Runs on the SQL warehouse, in dependency order. `02` scans 90 days of audit logs and takes a few minutes.
+# MAGIC Runs on the SQL warehouse, in dependency order. `02` scans all retained audit logs and can take several minutes.
 
 # COMMAND ----------
 
@@ -111,7 +123,7 @@ serialized = json.dumps(build_dashboard.render_dashboard(catalog, schema))
 if dashboard_id:
     w.api_client.do("PATCH", f"/api/2.0/lakeview/dashboards/{dashboard_id}",
                     body={"serialized_dashboard": serialized, "warehouse_id": warehouse_id})
-    print(f"Updated dashboard {dashboard_id}")
+    print(f"Updated dashboard {dashboard_id}: {existing.get('path')}")
 else:
     parent = parent_path or f"/Workspace/Users/{w.current_user.me().user_name}/GenieCodeUsage"
     w.workspace.mkdirs(parent)

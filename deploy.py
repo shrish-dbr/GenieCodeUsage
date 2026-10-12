@@ -62,6 +62,15 @@ def main():
     if proc.returncode != 0:
         sys.exit(f"Schema {target} is not available: {proc.stderr.strip()}\n"
                  "Create it first, or pass an existing --catalog/--schema. This script never creates schemas.")
+    if args.dashboard_id:
+        # Check before the views are rebuilt, so a wrong ID fails here rather than at step 4.
+        proc = subprocess.run(["databricks", "lakeview", "get", args.dashboard_id, "--profile", p, "-o", "json"],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            sys.exit(f"Dashboard {args.dashboard_id} is not available in this workspace: {proc.stderr.strip()}\n"
+                     "Check the ID (dashboard IDs are per workspace), or omit --dashboard-id to create a new one.")
+        if json.loads(proc.stdout).get("lifecycle_state") == "TRASHED":
+            sys.exit(f"Dashboard {args.dashboard_id} is in the trash. Restore it, or omit --dashboard-id to create a new one.")
 
     print("[2/4] Rendering SQL and dashboard JSON into build/")
     subprocess.run([sys.executable, str(ROOT / "build_dashboard.py"), "--catalog", args.catalog,
@@ -71,7 +80,7 @@ def main():
         print("[3/4] Skipping view creation (--skip-views)")
     else:
         for sql_file in sorted((BUILD / "sql").glob("*.sql")):
-            print(f"[3/4] Creating view from {sql_file.name} (02 scans 90 days of audit logs and takes a few minutes)")
+            print(f"[3/4] Creating view from {sql_file.name} (02 scans all retained audit logs and can take several minutes)")
             run_statement(sql_file.read_text(), args.warehouse_id, p)
 
     dashboard_json = (BUILD / "genie_code_usage_dashboard.json").read_text()

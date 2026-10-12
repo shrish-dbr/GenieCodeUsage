@@ -1,7 +1,7 @@
 -- Daily Genie Code interaction events per workspace x user x client type.
 CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_daily_users
 SCHEDULE CRON '0 0 2 * * ?' AT TIME ZONE 'UTC'
-COMMENT 'Daily Genie Code events per workspace and user from system.access.assistant_events (last 90 days)'
+COMMENT 'Daily Genie Code events per workspace and user from system.access.assistant_events (all retained history)'
 AS
 SELECT
   e.event_date,
@@ -17,5 +17,4 @@ SELECT
   count(*) AS events
 FROM system.access.assistant_events e
 LEFT JOIN system.access.workspaces_latest w ON e.workspace_id = w.workspace_id
-WHERE e.event_date >= date_sub(current_date(), 90)
 GROUP BY ALL

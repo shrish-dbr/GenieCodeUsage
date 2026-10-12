@@ -2,6 +2,8 @@
 
 An AI/BI (Lakeview) dashboard showing how people use **Genie Code** (formerly Databricks Assistant) across all workspaces in an account: who uses it, and what the agent does for them (code development, data discovery, SQL analysis, dashboards, data engineering, ML, external tools, or read-only Q&A).
 
+For a full explanation of how every metric is derived and what each visual, category and number means, see the [technical guide](docs/dashboard_guide.md).
+
 ## How it works
 
 Genie Code's agent actions are recorded in `system.access.audit` like any other API call, with a user agent of the form:
@@ -44,25 +46,25 @@ Each session's **primary category** is the one with the most distinct active min
 | `sql/03_gc_sessions_mv.sql` | `gc_sessions` | one row per agent session |
 | `sql/04_gc_session_activity_mv.sql` | `gc_session_activity` | session × category × activity |
 
-All four keep the last 90 days. They refresh daily at 02:00 (01, 02), 04:00 (03) and 06:00 (04) UTC, so each view refreshes after the views it reads.
+All four cover as much history as the system tables retain. Events that age out of a system table drop out of the views on the next refresh. They refresh daily at 02:00 (01, 02), 04:00 (03) and 06:00 (04) UTC, so each view refreshes after the views it reads.
 
 ### Dashboard pages
 
-- **Overview:** KPIs, monthly active users, monthly sessions by category, category mix
+- **Overview:** KPIs, monthly sessions by category, monthly active users, a category summary table (primary vs. any sessions, users, actions, error rate)
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
-- **User Detail:** top 20 users, per-user KPIs, trends, activities, workspaces and a session log
+- **User Detail:** a profile for the picked users: KPIs, workspaces and surfaces, and a session log
 - **Filters:** date, workspace, user, user type, surface, primary category, client type
 
 ### Filters and cross-filtering
 
 Almost every visual reads one shared dataset of sessions and activities (`ds_main`). So:
-- **Filters:** every filter on the Filters page, plus the User Detail page's user picker, applies to all of these visuals.
+- **Filters:** every filter on the Filters page, applies to all of these visuals. The User Detail page's user picker applies to that page only.
 - **Cross-filtering:** clicking a bar, slice, heatmap cell, pivot cell or table row filters the other session and activity visuals on the same page. Line charts and KPI tiles don't start cross-filters, but they do respond to them.
 
 Exceptions:
 - **User-count visuals** ("Active users", "Active workspaces", "Monthly active users", "Active days") read `system.access.assistant_events`, which has no category or surface. They follow the date, workspace, user, user type and client filters, but not the surface or category filters, and they don't respond to clicks on session visuals.
-- **The two top-N bars** ("Top 15 workspaces", "Top 20 users") rank inside their own query, because a widget can't limit itself to the top N. They follow every filter, but clicks on them don't cross-filter.
+- **The "Top 15 workspaces" bar** ranks inside its own query, because a widget can't limit itself to the top N. It follows the date, workspace, user, user type and client filters, but clicks on it don't cross-filter.
 
 ## Deploy
 
@@ -108,7 +110,7 @@ python3 deploy.py ... --dashboard-id <dashboard-id> --skip-views    # dashboard-
 
 ### After deploying
 
-`02` scans 90 days of audit logs and takes a few minutes. The views refresh themselves daily, so you only need to re-run the view step after editing the SQL.
+`02` scans all retained audit logs and can take several minutes. The views refresh themselves daily, so you only need to re-run the view step after editing the SQL.
 
 ## Access and privacy
 
@@ -119,6 +121,6 @@ python3 deploy.py ... --dashboard-id <dashboard-id> --skip-views    # dashboard-
 
 - **Categories describe what the agent did, not what the user asked.** No system table holds Genie Code prompts or replies.
 - **Python can't be split by purpose.** `commandText` in the audit log is redacted, so every Python cell counts as Code Development; SQL cells are identified from `commandLanguage`.
-- **Session-level data starts in late July 2026**, when the `sid/` tag first appeared in the user agent.
+- **Agent data is shorter than user data.** Session, category and activity visuals start when Genie Code agent events first appear in the audit log (2 July 2026 in the reference account). User counts from `assistant_events` go back as far as that table retains (about a year).
 - **New action types need a rule.** Agent actions not covered by the rules in `sql/02_gc_agent_activity_mv.sql` fall into *Context / Background* until one is added.
 - **Refresh order is by timing, not guaranteed.** If one view's refresh runs for more than about two hours, the next view reads the previous day's data.
