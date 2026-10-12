@@ -46,14 +46,14 @@ Each session's **primary category** is the one with the most distinct active min
 | `sql/03_gc_sessions_mv.sql` | `gc_sessions` | one row per agent session |
 | `sql/04_gc_session_activity_mv.sql` | `gc_session_activity` | session × category × activity |
 
-All four cover as much history as the system tables retain. Events that age out of a system table drop out of the views on the next refresh. They refresh daily at 02:00 (01, 02), 04:00 (03) and 06:00 (04) UTC, so each view refreshes after the views it reads.
+All four cover as much history as the system tables retain (`02` reads audit events from 2026-07-01, before which Genie Code agent events don't exist). Events that age out of a system table drop out of the views on the next refresh. They refresh daily at 02:00 (01, 02), 04:00 (03) and 06:00 (04) UTC, so each view refreshes after the views it reads.
 
 ### Dashboard pages
 
 - **Overview:** KPIs, monthly sessions by category, monthly active users, a category summary table (primary vs. any sessions, users, actions, error rate)
 - **Usage Patterns:** day × hour heatmap, category by surface, session depth, multi-category sessions, a table of agent activities
 - **Workspaces & Users:** workspace × category pivot, user directory, top workspaces
-- **User Detail:** a profile for the picked users: KPIs, workspaces and surfaces, and a session log
+- **User Detail:** a profile for the picked users: KPIs, a category-mix donut, workspaces and surfaces, and a session log
 - **Filters:** date, workspace, user, user type, surface, primary category, client type
 
 ### Filters and cross-filtering

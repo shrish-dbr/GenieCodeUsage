@@ -121,9 +121,9 @@ else:
 serialized = json.dumps(build_dashboard.render_dashboard(catalog, schema))
 
 if dashboard_id:
-    w.api_client.do("PATCH", f"/api/2.0/lakeview/dashboards/{dashboard_id}",
-                    body={"serialized_dashboard": serialized, "warehouse_id": warehouse_id})
-    print(f"Updated dashboard {dashboard_id}: {existing.get('path')}")
+    updated = w.api_client.do("PATCH", f"/api/2.0/lakeview/dashboards/{dashboard_id}",
+                              body={"serialized_dashboard": serialized, "warehouse_id": warehouse_id})
+    print(f"Updated dashboard {dashboard_id}: {updated.get('path')}")
 else:
     parent = parent_path or f"/Workspace/Users/{w.current_user.me().user_name}/GenieCodeUsage"
     w.workspace.mkdirs(parent)

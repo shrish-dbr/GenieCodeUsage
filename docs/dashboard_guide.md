@@ -76,7 +76,7 @@ The refresh times are staggered so each view refreshes after the views it reads.
 
 ### How far back the data goes
 
-The views have no date filter, so they cover as much as the system tables retain. Events that age out of a system table drop out of the views at the next refresh. The two sources have different spans:
+The views cover as much as the system tables retain. Events that age out of a system table drop out of the views at the next refresh. `gc_agent_activity` also has a fixed lower bound of `event_date >= '2026-07-01'`. Genie Code agent events don't exist before then, so the bound loses nothing. It lets the daily refresh skip older audit partitions instead of scanning the whole account-wide audit table. The two sources have different spans:
 
 | Data | Typical span | Affects |
 |---|---|---|
@@ -89,7 +89,7 @@ So the user-count line usually goes back further than the session charts.
 
 ## 3. From audit events to categories
 
-`gc_agent_activity` (`sql/02_gc_agent_activity_mv.sql`) keeps audit rows whose `user_agent` starts with `databricks-background-genie`. It drops `submitCommand` events, so each cell run is counted once, through `runCommand`.
+`gc_agent_activity` (`sql/02_gc_agent_activity_mv.sql`) keeps audit rows whose `user_agent` starts with `databricks-background-genie`. It drops `submitCommand` events, so each cell run is counted once, through `runCommand`. It also reads only `event_date >= '2026-07-01'`, which keeps the scan off audit partitions from before the agent existed.
 
 ### Extracted fields
 
@@ -207,6 +207,8 @@ These are the rows of `gc_daily_users`, plus a `user_type` column:
 - **Automated / eval** if the user is null or not an email address, or if `gc_sessions` flagged that user on that day as automated / eval
 - **Human** otherwise
 
+The session-based flag only exists where there's agent data (from July 2026). Earlier user-days can only be flagged by the non-email rule, so a high-volume eval account counts as Human there. An events-per-day threshold doesn't work as a substitute, because heavy agent-mode users also log thousands of events a day. In the reference account the effect is small: only 14 of about 22,800 user-days before July 2026 had more than 1,000 events.
+
 This way the *User type* filter applies to the user counts too.
 
 **Client type** comes from the `assistant_events` user agent:
@@ -222,7 +224,11 @@ This way the *User type* filter applies to the user counts too.
 
 This is the main dataset. It has **one row per session × category × activity**. A read-only session gets **one row**, with `category = 'Q&A / Read-only'` and `activity = 'Read context only'`.
 
-Because a session can span several rows, session-level numbers are stored **only on each session's first row** and are zero on the others: `session_row`, `session_is_action`, `session_active_minutes`, `session_duration_minutes`, `session_total_actions`, `session_cells_run`, `session_notebooks_created`, `session_errors`. A `SUM()` over any of these therefore counts each session exactly once, under any filter. Session counts use `COUNT(DISTINCT session_id)`.
+Because a session can span several rows, session-level numbers are stored **only on each session's first row** and are zero on the others: `session_active_minutes`, `session_duration_minutes`, `session_total_actions`, `session_cells_run`, `session_notebooks_created`, `session_errors`. A `SUM()` over any of these therefore counts each session exactly once. Session counts use `COUNT(DISTINCT session_id)`.
+
+**Caveat:** a filter on `category`, such as clicking a row in a category table, can hide a session's first row. That row belongs to the session's alphabetically first category. While such a filter is active, `SUM(session_*)` undercounts. For this reason:
+- these sums only appear on pages with no category-row visuals: the User directory and User Detail
+- *Action rate* uses distinct sessions instead, so it stays correct under any filter
 
 Other derived columns:
 
@@ -240,7 +246,7 @@ Dataset-level measures, which are recalculated for whatever a visual groups by:
 
 | Measure | Formula | Meaning |
 |---|---|---|
-| **Action rate** | `SUM(session_is_action) / SUM(session_row)` | Share of sessions where the agent changed or ran something, i.e. not Q&A / Read-only |
+| **Action rate** | `COUNT(DISTINCT session_id where primary_category ≠ Q&A / Read-only) / COUNT(DISTINCT session_id)` | Share of sessions where the agent changed or ran something, i.e. not Q&A / Read-only |
 | **Primary sessions** | `COUNT(DISTINCT session_id)` where `category = primary_category` | Sessions whose primary category is the row's category |
 | **Error rate** | `SUM(errors) / SUM(actions)` | Share of **category actions** that returned an error |
 
@@ -288,7 +294,7 @@ This dataset is the distinct users per workspace from `ds_users`, with `LIMIT 15
 | **Sessions that took action** (KPI) | Action rate | `ds_main` |
 | **Monthly agent sessions by primary category** | Stacked bar: sessions per month, coloured by primary category. Shows both volume and mix. | `ds_main` |
 | **Monthly active users by client** | Line: distinct users per month by client type. Usually goes back further than the session charts ([section 2](#how-far-back-the-data-goes)). | `ds_users` |
-| **Category summary** | One row per category: Sessions (primary), Sessions (any), Users, Agent actions, Error rate. Sorted by primary sessions. | `ds_main` |
+| **Category summary** | One row per category: Sessions (primary), Sessions (any), Users, Agent actions, Error rate. Sorted by Sessions (any). | `ds_main` |
 
 **How to read the category summary:**
 - *Primary* answers "what are sessions mainly for?"
@@ -318,12 +324,12 @@ All of these use `ds_main`.
 User directory columns:
 - User, Top category, Primary workspace
 - Sessions, Action rate, Active days (days with a session)
-- First seen, Last seen
+- First seen (retained data), Last seen. *First seen* is the earliest session still in the data, not necessarily the user's first use.
 - Active min, Cells run, Notebooks created, Workspaces
 
 ### User Detail: one person's profile
 
-Pick one or more users with the **User(s)** picker at the top right. With nobody selected, the page shows everyone. To see trends and category mix for the same users, use the *User* filter on the Filters page; it applies to every page.
+Pick one or more users with the **User(s)** picker at the top right. With nobody selected, the page shows everyone. To see trends for the same users, use the *User* filter on the Filters page; it applies to every page.
 
 | Visual | Shows | Dataset |
 |---|---|---|
@@ -331,6 +337,7 @@ Pick one or more users with the **User(s)** picker at the top right. With nobody
 | **Sessions that took action** (KPI) | Action rate | `ds_main` |
 | **Active agent minutes** (KPI) | Sum of session active minutes | `ds_main` |
 | **Active days** (KPI) | Days with any Genie Code event | `ds_users` |
+| **Category mix** | Donut: the picked users' sessions by primary category. Clicking a slice filters the page to that category. | `ds_main` |
 | **Workspaces and surfaces used** | Sessions per workspace × surface | `ds_main` |
 | **Session log** | Every session, newest first, with the columns below | `ds_main` |
 
@@ -406,6 +413,8 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 - **New action types need a rule.** Agent actions with no rule fall into *Context / Background*, so a session made only of such actions shows as *Q&A / Read-only*. Add rules in `sql/02_gc_agent_activity_mv.sql`.
 - **Session data depends on the `sid/` tag.** Agent events without one are excluded from sessions.
 - **History is limited by system table retention.** Data that ages out of a system table drops out of the views. Keeping it longer would require writing to tables that append each day.
+- **The oldest edge moves.** Once audit retention passes the fixed July 2026 lower bound, the earliest day drops out each day. A session that straddles that day loses its first events, so its start, duration and primary category can change. Sessions last minutes, so very few are affected.
+- **User type is weaker before July 2026.** Earlier user-days can only be flagged as automated if the identity isn't an email (see [section 5](#5-dashboard-datasets)), so older months of the user counts may include some eval traffic.
 - **Refresh order is by timing, not guaranteed.** If one view's refresh runs for more than about two hours, the next view reads the previous day's data.
 - **Privacy.** System tables are account-wide, so the dashboard shows individual user emails from every workspace. It's published without embedded credentials: each viewer needs `SELECT` on the four views and access to the warehouse.
 
