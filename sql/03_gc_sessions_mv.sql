@@ -7,7 +7,7 @@
 CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_sessions
 -- Refreshes after gc_agent_activity (02:00 UTC), which it reads.
 SCHEDULE CRON '0 0 4 * * ?' AT TIME ZONE 'UTC'
-COMMENT 'Genie Code agent sessions with owner, workspace and primary usage category (last 90 days)'
+COMMENT 'Genie Code agent sessions with owner, workspace and primary usage category (all retained history)'
 AS
 WITH act AS (
   SELECT * FROM ${catalog}.${schema}.gc_agent_activity

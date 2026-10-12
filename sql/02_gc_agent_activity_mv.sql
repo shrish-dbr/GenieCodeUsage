@@ -3,7 +3,7 @@
 -- at minute x workspace x user x session x action grain, tagged with a usage category.
 CREATE OR REPLACE MATERIALIZED VIEW ${catalog}.${schema}.gc_agent_activity
 SCHEDULE CRON '0 0 2 * * ?' AT TIME ZONE 'UTC'
-COMMENT 'Genie Code agent tool calls by minute/session/action with usage category (last 90 days)'
+COMMENT 'Genie Code agent tool calls by minute/session/action with usage category (all retained history)'
 AS
 WITH src AS (
   SELECT
@@ -21,8 +21,7 @@ WITH src AS (
     a.request_params.fully_qualified_name AS mcp_server,
     a.response.status_code AS status_code
   FROM system.access.audit a
-  WHERE a.event_date >= date_sub(current_date(), 90)
-    AND a.user_agent LIKE 'databricks-background-genie%'
+  WHERE a.user_agent LIKE 'databricks-background-genie%'
     AND a.action_name <> 'submitCommand'
 ),
 classified AS (
