@@ -6,8 +6,9 @@
 Steps:
   1. Checks that <catalog>.<schema> already exists (it is never created).
   2. Renders the SQL and dashboard JSON into build/ via build_dashboard.py.
-  3. Creates the four materialized views in dependency order (skipped with --skip-views).
-  4. Creates the dashboard, or updates it when --dashboard-id is given, then publishes it.
+  3. Creates the six materialized views in dependency order (skipped with --skip-views).
+  4. Updates the dashboard given by --dashboard-id, or else the one already in the dashboard folder, or else
+     creates it; then publishes it.
 
 Requires the Databricks CLI, authenticated for <profile>.
 """
@@ -18,9 +19,10 @@ import subprocess
 import sys
 import time
 
+from build_dashboard import DISPLAY_NAME
+
 ROOT = pathlib.Path(__file__).parent
 BUILD = ROOT / "build"
-DISPLAY_NAME = "Genie Code Usage Patterns"
 
 
 def cli(*args, profile, parse=True):
@@ -62,6 +64,15 @@ def main():
     if proc.returncode != 0:
         sys.exit(f"Schema {target} is not available: {proc.stderr.strip()}\n"
                  "Create it first, or pass an existing --catalog/--schema. This script never creates schemas.")
+    parent = args.parent_path or f"/Workspace/Users/{cli('current-user', 'me', profile=p)['userName']}/GenieCodeUsage"
+    if not args.dashboard_id:
+        # No ID given: reuse the dashboard created in the folder before, rather than creating a copy.
+        # A dashboard is stored as <folder>/<display name>.lvdash.json.
+        proc = subprocess.run(["databricks", "workspace", "get-status", f"{parent}/{DISPLAY_NAME}.lvdash.json",
+                               "--profile", p, "-o", "json"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            args.dashboard_id = json.loads(proc.stdout).get("resource_id")
+            print(f"      Found the existing dashboard {args.dashboard_id} in {parent}; it will be updated")
     if args.dashboard_id:
         # Check before the views are rebuilt, so a wrong ID fails here rather than at step 4.
         proc = subprocess.run(["databricks", "lakeview", "get", args.dashboard_id, "--profile", p, "-o", "json"],
@@ -91,7 +102,6 @@ def main():
         cli("lakeview", "update", args.dashboard_id, *dataset_flags, profile=p)
         dashboard_id = args.dashboard_id
     else:
-        parent = args.parent_path or f"/Workspace/Users/{cli('current-user', 'me', profile=p)['userName']}/GenieCodeUsage"
         print(f"[4/4] Creating dashboard in {parent}")
         cli("workspace", "mkdirs", parent, profile=p, parse=False)
         created = cli("lakeview", "create", "--display-name", DISPLAY_NAME, "--warehouse-id", args.warehouse_id,
