@@ -48,7 +48,9 @@ sess AS (
          sum(action_count) AS total_actions,
          sum(CASE WHEN is_signal THEN action_count ELSE 0 END) AS signal_actions,
          sum(error_count) AS error_count,
+         sum(CASE WHEN error_cause <> 'Expected background probe' THEN error_count ELSE 0 END) AS actionable_errors,
          sum(CASE WHEN action_name = 'runCommand' THEN action_count ELSE 0 END) AS cells_run,
+         sum(CASE WHEN action_name = 'runCommand' THEN error_count ELSE 0 END) AS cells_failed,
          sum(CASE WHEN activity = 'Create notebook' THEN action_count ELSE 0 END) AS notebooks_created
   FROM act
   GROUP BY session_id
@@ -78,7 +80,9 @@ SELECT
   s.total_actions,
   s.signal_actions,
   s.error_count,
+  s.actionable_errors,
   s.cells_run,
+  s.cells_failed,
   s.notebooks_created,
   coalesce(p.primary_category, 'Q&A / Read-only') AS primary_category,
   coalesce(p.categories_used, 0) AS categories_used,

@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Deploy: Genie Code Usage Patterns
 # MAGIC
-# MAGIC Creates the four materialized views in an **existing** catalog/schema, then creates (or updates) and publishes the dashboard.
+# MAGIC Creates the six materialized views in an **existing** catalog/schema, then creates (or updates) and publishes the dashboard.
 # MAGIC The schema is never created.
 # MAGIC
 # MAGIC **Requires:** this repo added to the workspace as a Git folder (this notebook imports `build_dashboard.py` and reads `sql/` next to it),
@@ -12,14 +12,15 @@
 # MAGIC 2. **Run all** to deploy everything, or run cells one at a time:
 # MAGIC    - **Step 2** only prints the SQL. Copy it into the SQL editor if you'd rather create the views by hand.
 # MAGIC    - **Step 3** creates the views. Set `create_views` to `no` to skip it, e.g. for a dashboard-only change.
-# MAGIC    - **Step 4** creates or updates the dashboard. Put the ID printed by the first run into `dashboard_id` so later runs update the same dashboard instead of creating a copy.
+# MAGIC    - **Step 4** creates or updates the dashboard. With `dashboard_id` blank, it updates the dashboard already in the
+# MAGIC      dashboard folder (`Genie Code Usage Patterns`) if there is one, and creates it otherwise. Step 1 prints which it will do.
 
 # COMMAND ----------
 
 dbutils.widgets.text("catalog", "", "1. Catalog (existing)")
 dbutils.widgets.text("schema", "", "2. Schema (existing)")
 dbutils.widgets.text("warehouse_id", "", "3. SQL warehouse ID")
-dbutils.widgets.text("dashboard_id", "", "4. Dashboard ID (blank = create new)")
+dbutils.widgets.text("dashboard_id", "", "4. Dashboard ID (blank = find in folder)")
 dbutils.widgets.text("parent_path", "", "5. Dashboard folder (blank = your home)")
 dbutils.widgets.dropdown("create_views", "yes", ["yes", "no"], "6. Create views")
 
@@ -62,6 +63,17 @@ except NotFound:
 w.warehouses.get(warehouse_id)
 print(f"Target: {catalog}.{schema}, warehouse {warehouse_id}")
 
+parent = parent_path or f"/Workspace/Users/{w.current_user.me().user_name}/GenieCodeUsage"
+if not dashboard_id:
+    # No ID given: reuse the dashboard this notebook created in the folder before, so a blank or reset widget
+    # doesn't create a copy. A dashboard is stored as <folder>/<display name>.lvdash.json.
+    try:
+        node = w.workspace.get_status(f"{parent}/{build_dashboard.DISPLAY_NAME}.lvdash.json")
+        dashboard_id = node.resource_id
+        print(f"dashboard_id widget is blank; found the existing dashboard in {parent}.")
+    except NotFound:
+        pass
+
 if dashboard_id:
     # Check before the views are rebuilt, so a wrong ID fails here rather than in Step 4.
     try:
@@ -72,12 +84,14 @@ if dashboard_id:
     if existing.get("lifecycle_state") == "TRASHED":
         raise ValueError(f"Dashboard {dashboard_id} is in the trash. Restore it, or clear the dashboard_id widget "
                          "to create a new dashboard.")
-    print(f"Will update dashboard {dashboard_id}: {existing.get('path')}")
+    print(f"Will UPDATE dashboard {dashboard_id}: {existing.get('path')}")
+else:
+    print(f"Will CREATE a new dashboard in {parent} (no dashboard_id given and none found there).")
 
 # COMMAND ----------
 
 # MAGIC %md ## Step 2: Render the SQL
-# MAGIC Prints each view's SQL with your catalog/schema filled in. Run them in order (`01` → `04`) if you are creating the views by hand.
+# MAGIC Prints each view's SQL with your catalog/schema filled in. Run them in order (`01` → `06`) if you are creating the views by hand.
 
 # COMMAND ----------
 
@@ -125,14 +139,13 @@ if dashboard_id:
                               body={"serialized_dashboard": serialized, "warehouse_id": warehouse_id})
     print(f"Updated dashboard {dashboard_id}: {updated.get('path')}")
 else:
-    parent = parent_path or f"/Workspace/Users/{w.current_user.me().user_name}/GenieCodeUsage"
     w.workspace.mkdirs(parent)
     created = w.api_client.do("POST", "/api/2.0/lakeview/dashboards",
-                              body={"display_name": "Genie Code Usage Patterns", "warehouse_id": warehouse_id,
+                              body={"display_name": build_dashboard.DISPLAY_NAME, "warehouse_id": warehouse_id,
                                     "serialized_dashboard": serialized, "parent_path": parent})
     dashboard_id = created["dashboard_id"]
     print(f"Created dashboard {dashboard_id} in {parent}")
-    print(f"Put {dashboard_id} in the dashboard_id widget so later runs update it instead of creating a copy.")
+    print(f"Later runs find it in {parent} automatically, or put {dashboard_id} in the dashboard_id widget.")
 
 w.api_client.do("POST", f"/api/2.0/lakeview/dashboards/{dashboard_id}/published",
                 body={"warehouse_id": warehouse_id, "embed_credentials": False})

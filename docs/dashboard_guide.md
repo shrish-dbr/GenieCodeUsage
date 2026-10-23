@@ -18,10 +18,12 @@ This guide explains where every number on the dashboard comes from: the source t
 
 ## 1. What the dashboard measures
 
-The dashboard answers two questions about **Genie Code** (formerly Databricks Assistant) across every workspace in the account:
+The dashboard answers four questions about **Genie Code** (formerly Databricks Assistant) across every workspace in the account:
 
 1. **Who uses it?** Users, workspaces, and the client they use it from.
 2. **What does the agent do for them?** Writing code, exploring the catalog, running SQL, building dashboards, and so on.
+3. **Where does it fail, and why?** Error causes, each with how to reduce it.
+4. **How many DBUs does it use, and what should we do?** DBUs by user and category, plus action items generated from the data.
 
 It covers Genie Code only. It does **not** include people chatting directly in Genie spaces (Genie Agents), "Ask Genie" in AI/BI dashboards, or Agent Bricks. It does include the times the Genie Code agent worked with a Genie space for a user (see *Dashboards & BI* in [section 3](#3-from-audit-events-to-categories)).
 
@@ -37,8 +39,10 @@ system.access.assistant_events ──► gc_daily_users ────────
 system.access.audit ──► gc_agent_activity ──► gc_sessions ──────────────┤
   (agent events only)          │                   │                    ├─► ds_main ──────────► almost every other visual
                                └──────────► gc_session_activity ────────┘
-system.access.workspaces_latest ──► workspace names (joined in 01 and 03)
-                                    gc_daily_users + gc_sessions ───────► ds_top_ws_users ──► "Top 15 workspaces" bar
+system.access.workspaces_latest ──► workspace names (joined in 01, 03 and 06)
+gc_agent_activity + gc_sessions ──► gc_session_errors ──────────────────► ds_errors ────────► error visuals
+system.billing.usage + gc_sessions ──► gc_cost ─────── ───────────► ds_cost ──────────► cost visuals
+gc_sessions + gc_session_errors + gc_cost ──────────────────────────────► ds_actions, ds_user_actions ──► action items, user scorecard
 ```
 
 ### Source system tables
@@ -48,6 +52,7 @@ system.access.workspaces_latest ──► workspace names (joined in 01 and 03)
 | `system.access.assistant_events` | One Genie Code interaction submitted by a user | Active users, active workspaces, monthly active users, active days |
 | `system.access.audit` | One API call made in the account | Agent actions, and from them sessions and categories |
 | `system.access.workspaces_latest` | One workspace | Turning workspace IDs into names |
+| `system.billing.usage` | DBUs used by one product in one hour | Genie Code DBUs (`billing_origin_product = 'GENIE'`, `usage_metadata.genie.surface = 'GENIE_CODE'`), per user from `identity_metadata.run_as` |
 
 ### How agent actions are identified
 
@@ -63,7 +68,7 @@ databricks-background-genie Chrome/... group/<surface> sid/<session-id>
 
 ### Materialized views
 
-All four live in the target catalog and schema, cover all the history the system tables keep, and refresh on a daily schedule (UTC).
+All six live in the target catalog and schema, cover all the history the system tables keep, and refresh on a daily schedule (UTC).
 
 | View | Source | Grain | Refresh (UTC) |
 |---|---|---|---|
@@ -71,6 +76,8 @@ All four live in the target catalog and schema, cover all the history the system
 | `gc_agent_activity` (`sql/02`) | `audit` | minute × workspace × user × session × service × action | 02:00 |
 | `gc_sessions` (`sql/03`) | `gc_agent_activity` | one row per agent session | 04:00 |
 | `gc_session_activity` (`sql/04`) | `gc_agent_activity` + `gc_sessions` | session × category × activity (category actions only) | 06:00 |
+| `gc_session_errors` (`sql/05`) | `gc_agent_activity` + `gc_sessions` | session × category × activity × error cause (failed events only) | 06:00 |
+| `gc_cost` (`sql/06`) | `billing.usage` + `gc_sessions` | day × workspace × user × session (DBUs allocated to sessions) | 06:00 |
 
 The refresh times are staggered so each view refreshes after the views it reads. Data on the dashboard therefore runs **up to the previous day**.
 
@@ -100,7 +107,7 @@ So the user-count line usually goes back further than the session charts.
 | `command_language` | `request_params.commandLanguage` (for example `sql`, `python`) |
 | `asset_type` | `request_params.assetType` (notebook vs. file) |
 | `rpc_method`, `mcp_server` | `request_params.json_rpc_method` and `fully_qualified_name` for MCP calls |
-| `status_code` | `response.status_code`. Codes of 400 and above count as errors. |
+| `status_code`, `error_message` | `response.status_code` and `response.error_message`. A status of 400 or above, or a gRPC-style code from 1 to 199, is an error. That covers HTTP 4xx/5xx and failed notebook cells (the audit log records a failed `runCommand` with status `1`, not 400+) and failed git calls (4, 12, 13). Status 0, 2xx and 3xx are not errors. |
 
 ### Category rules
 
@@ -138,11 +145,34 @@ Each event also gets a readable **activity** label, shown in the activity tables
 | `<service>: <action>` | Anything not covered above |
 | `Read context only` | Added on the dashboard for read-only sessions, which have no category actions (see [section 5](#5-dashboard-datasets)) |
 
+### Error causes
+
+Each failed event also gets an **error cause**, again first match wins. The dashboard attaches the *why it happens* and *how to reduce it* text in `build_dashboard.py` (`ERROR_FIXES`), so the advice can change without rebuilding the views.
+
+| Error cause | Rule | Cause group |
+|---|---|---|
+| *Expected background probe* | `wsfsStreamingRead` 404; `getUserMappedCredential` 404, or any error for a built-in connector credential (`system_ai_agent_slack_mcp`, `..._github_mcp`, `..._gmail` and so on, which the agent checks in every session); `getConnection` for a `system.ai.*` connection, the `databricks-package-management` secret scope, `getEntityTagAssignment` 404. The agent checks for things that usually don't exist; "not found" is the normal answer. | Not actionable; excluded everywhere |
+| Wrong compute for cell language | `runCommand` failing with "SQL warehouses only support executing SQL cells" | Compute & conflicts |
+| Cell cancelled or skipped | `runCommand` with `CommandCancelledException` / `CommandSkippedException` | Failed cells |
+| SQL cell failed / Python / code cell failed | Any other failed `runCommand`, split by `commandLanguage` | Failed cells |
+| Rate limited | Status 429 or `REQUEST_LIMIT_EXCEEDED` | External tools |
+| Table / schema / catalog not found | `TABLE_`, `SCHEMA_`, `CATALOG_`, `VOLUME_` or `FUNCTION_DOES_NOT_EXIST`; `TABLE_OR_VIEW_NOT_FOUND`; `SCHEMA_`, `CATALOG_`, `VOLUME_` or `ROUTINE_NOT_FOUND` | Names not found |
+| External connection auth failed | User-mapped / foreign credential calls, or a UC HTTP connection returning 401/403 | Access & auth |
+| Permission denied | Status 403 or `PERMISSION_DENIED` | Access & auth |
+| External tool / MCP call failed | Other `ucHttpConnection` / `mcpService` errors, `getMcpService`, `listMcpServices` | External tools |
+| Notebook compute busy | `attachNotebook` errors (already attached or attaching) | Compute & conflicts |
+| Dashboard request rejected | `dashboards` or `pages` errors | Other |
+| Write conflict | Status 409 or "already exists" | Compute & conflicts |
+| Platform / service error | Status 500 and above | Other |
+| Other request error | Anything else | Other |
+
+In the reference account about 95% of raw error events are expected probes, which is why they're excluded from every rate.
+
 ### Output grain
 
-Events are grouped to the **minute** (`event_minute`) per workspace, user, session, service and action:
+Events are grouped to the **minute** (`event_minute`) per workspace, user, session, service, action and error cause:
 - `action_count`: number of events in that minute
-- `error_count`: events with status 400 or above
+- `error_count`: failed events (status 400+ or 1–199), including expected probes
 
 Grouping by minute keeps the view compact. It's also the unit used for *active minutes* below.
 
@@ -165,8 +195,10 @@ Grouping by minute keeps the view compact. It's also the unit used for *active m
 | `active_minutes` | Distinct minutes with **any** agent event, including background events |
 | `total_actions` | All agent events, including background events |
 | `signal_actions` | Category actions only |
-| `error_count` | All events with status 400 or above, including background events |
+| `error_count` | All failed events, including expected background probes |
+| `actionable_errors` | Failed events except expected background probes |
 | `cells_run` | `runCommand` events (any language) |
+| `cells_failed` | Failed `runCommand` events |
 | `notebooks_created` | Events with the activity *Create notebook* |
 
 ### Primary category
@@ -190,16 +222,28 @@ The 50-a-day threshold separates scripted or evaluation traffic from real use. *
 ### `gc_session_activity`
 
 `gc_session_activity` (`sql/04`) joins category actions back to their session and groups them by session × category × activity:
-- `active_minutes`: distinct minutes for that activity
-- `actions`, `errors`
+- `active_minutes`: distinct minutes for that activity. Minutes overlap across activities, so don't add them up per category.
+- `category_minutes`: distinct minutes with any action in the category, set only on each session × category's first activity row (zero on the others), so `SUM()` gives correct per-category minutes
+- `actions`
+- `errors`: actionable errors only (expected background probes excluded)
 
 Each row also carries the session's workspace, owner, user type, surface and primary category.
+
+### `gc_session_errors`
+
+`gc_session_errors` (`sql/05`) keeps failed events only, grouped by session × category × activity × error cause, with the same session attributes. `is_actionable` is false for expected background probes. Unlike `gc_session_activity` it includes background events, because many real failures (external tools, credentials) happen outside category actions.
+
+### `gc_cost`
+
+`gc_cost` (`sql/06`) reads Genie Code DBUs from `system.billing.usage`. `is_free` marks the `GENIE_FREE_USAGE` SKU; free-tier DBUs are counted like any other. The dashboard shows DBUs only, not dollars.
+
+Billing has no session ID, so DBUs are **allocated**. Each billing row (workspace × user × day) is split across that user's agent sessions in the **same workspace** that day, in proportion to their active minutes, and each piece takes the session's primary category. If the user had no session in that workspace that day, the row is split across their sessions in any workspace that day instead; it keeps the billing workspace, so the session's own workspace can differ. User-days with DBUs but no agent session keep one row with category **Chat only (no agent actions)**. That's most of the DBUs in the reference account (about 84%), because most Genie Code turns answer in chat without calling a tool. Totals add up exactly; only the split by session and category is an estimate.
 
 ---
 
 ## 5. Dashboard datasets
 
-The dashboard runs three queries (datasets) on top of the views.
+The dashboard runs seven queries (datasets) on top of the views.
 
 ### `ds_users`: "Genie Code daily users"
 
@@ -227,17 +271,15 @@ This is the main dataset. It has **one row per session × category × activity**
 Because a session can span several rows, session-level numbers are stored **only on each session's first row** and are zero on the others: `session_active_minutes`, `session_duration_minutes`, `session_total_actions`, `session_cells_run`, `session_notebooks_created`, `session_errors`. A `SUM()` over any of these therefore counts each session exactly once. Session counts use `COUNT(DISTINCT session_id)`.
 
 **Caveat:** a filter on `category`, such as clicking a row in a category table, can hide a session's first row. That row belongs to the session's alphabetically first category. While such a filter is active, `SUM(session_*)` undercounts. For this reason:
-- these sums only appear on pages with no category-row visuals: the User directory and User Detail
+- these sums only appear on pages with no visuals that group `ds_main` by `category`: Errors & Fixes and User Detail. User Detail's *Category breakdown* reads `ds_user_categories` for this reason.
 - *Action rate* uses distinct sessions instead, so it stays correct under any filter
 
 Other derived columns:
 
 | Column | Definition |
 |---|---|
-| `category`, `activity`, `actions`, `errors` | From `gc_session_activity`. **Category actions only**, so they exclude background events. |
+| `category`, `activity`, `actions`, `errors` | From `gc_session_activity`. **Category actions only**, so they exclude background events; `errors` also excludes expected probes. |
 | `categories_list` | The session's categories, comma-separated |
-| `user_top_category` | The user's most frequent primary category across **all history**, ignoring Q&A. Users who only have Q&A sessions show *Q&A / Read-only*. **Filters don't change it.** |
-| `user_primary_workspace` | The user's workspace with the most sessions across **all history**, ignoring Account-level. **Filters don't change it.** |
 | `day_of_week`, `hour_of_day` | From `session_start`, in UTC |
 | `session_length` | Active minutes in buckets: `1 min`, `2-5 min`, `6-15 min`, `16-60 min`, `60+ min` |
 | `categories_bucket` | `0 (read-only)`, `1 category`, `2 categories`, `3+ categories` |
@@ -248,11 +290,57 @@ Dataset-level measures, which are recalculated for whatever a visual groups by:
 |---|---|---|
 | **Action rate** | `COUNT(DISTINCT session_id where primary_category ≠ Q&A / Read-only) / COUNT(DISTINCT session_id)` | Share of sessions where the agent changed or ran something, i.e. not Q&A / Read-only |
 | **Primary sessions** | `COUNT(DISTINCT session_id)` where `category = primary_category` | Sessions whose primary category is the row's category |
-| **Error rate** | `SUM(errors) / SUM(actions)` | Share of **category actions** that returned an error |
+| **Error rate** | `SUM(errors) / SUM(actions)` | Share of **category actions** that returned an error (including failed cells) |
+| **Failed cell rate** | `SUM(session_cells_failed) / SUM(session_cells_run)` | Share of agent-run notebook cells that failed |
+| **Sessions with errors** | `COUNT(DISTINCT session_id where the session has an actionable error) / COUNT(DISTINCT session_id)` | Share of sessions with at least one actionable error |
 
-### `ds_top_ws_users`: "Top workspaces by users"
+`session_errors` holds the session's **actionable** errors. Per-category minutes aren't in `ds_main`; User Detail's category breakdown gets them from `ds_user_categories`.
 
-This dataset is the distinct users per workspace from `ds_users`, with `LIMIT 15`. A visual can't limit itself to its top N rows, so the ranking happens inside the query. The filters reach it through **query parameters** instead of field filters. As a result it **can't take part in click-to-cross-filter**.
+### `ds_user_categories`: "Genie Code activity by category"
+
+The rows of `gc_session_activity` plus one *Read context only* row per read-only session, with `category_minutes` (the read-only row carries the session's active minutes). It backs only User Detail's *Category breakdown*, so clicking a category there filters that table alone instead of hiding rows other User Detail visuals sum over. It has the same *Primary sessions* and *Error rate* measures as `ds_main`.
+
+### `ds_errors`: "Genie Code agent errors"
+
+The actionable rows of `gc_session_errors` (expected probes removed), plus `cause_group`, `likely_cause` and `how_to_reduce` from `ERROR_FIXES`.
+
+### `ds_cost`: "Genie Code DBUs"
+
+The rows of `gc_cost`, with `billing_tier` (*Free tier* / *Billable*). Measures: **DBUs per user** (`SUM(dbus) / COUNT(DISTINCT user_email)`) and **Billable share** (share of DBUs outside the free tier).
+
+### `ds_actions` and `ds_user_actions`: action items and user scorecard
+
+Both aggregate across `gc_sessions`, `gc_session_errors` and `gc_cost` inside SQL, so they take the date, workspace, user, user type and primary category filters as **parameters** and don't cross-filter. Category matches `primary_category` for sessions and errors and `cost_category` for DBUs. Rows with no user are left out of the per-user numbers (the scorecard and the top-10% share). The thresholds (`LONG_SESSION_MINUTES = 60`, `RETRY_FAILED_CELLS = 3`) are defined once in `build_dashboard.py`.
+
+`ds_actions` returns one row per finding that applies to the filtered period:
+
+| Area | Topic | Fires when | Priority |
+|---|---|---|---|
+| Reduce errors | The top 3 actionable error causes by sessions, one row each | Any errors of that cause | High if 5%+ of sessions hit it, Medium if 1%+, else Low |
+| Reduce errors | Other error causes: the remaining causes in one row, pointing to Errors & Fixes | More than 3 causes | Same thresholds, on the sessions hit by any of them |
+| Cut DBUs | Retry loops | Sessions with 3+ failed cells | High if 5%+ of sessions, Medium if 1%+ |
+| Cut DBUs | Long sessions | Sessions with more than 60 active minutes | High if they carry 30%+ of allocated DBUs, Medium if 10%+ |
+| Cut DBUs | Usage concentration | 10+ users with DBUs | Medium if the top 10% of users use 50%+ of DBUs |
+| Use it effectively | Read-only Q&A sessions | Any read-only sessions | Medium if 50%+ of sessions |
+| Use it effectively | Chat-only DBUs | Any chat-only DBUs | Low |
+| Track | DBUs per productive session | Any DBUs allocated to sessions that took action (those DBUs ÷ those sessions) | Low |
+
+`ds_user_actions` (the **User scorecard**) returns one row per user, including users with DBUs but no agent sessions, with primary workspace, top category, active days, first and last seen, notebooks created, workspaces, sessions, action rate, failed cell rate, retry and 60+ minute sessions, actionable errors and top cause, DBUs and DBUs per session. **Suggested action** is the first rule that matches:
+
+1. No agent sessions and in the top 10% of users by DBUs → *Top-10% DBUs, all chat*
+2. No agent sessions → *Chat only*
+3. 3+ retry sessions → *Retry loops*
+4. 10+ cells and 25%+ failed → *Many failed cells*
+5. Top cause *not found* with 5+ errors → *Agent guesses names*
+6. Top cause *permission denied* with 5+ errors → *Permission errors*
+7. Top cause an external tool or connection with 5+ errors → *External tool errors*
+8. Top 10% of users by DBUs with 80%+ of their DBUs chat-only → *Top-10% DBUs, mostly chat*
+9. 5+ sessions and 30%+ over 60 minutes → *Long sessions*
+10. 5+ sessions and under 30% took action → *Mostly Q&A*
+11. 5+ sessions, 60%+ took action and under 10% failed cells → *Effective user*
+12. Otherwise *No action needed*
+
+The top-10% DBU rank is computed within the filtered users, so it means little when the *User* filter narrows to a few people.
 
 ---
 
@@ -270,11 +358,17 @@ This dataset is the distinct users per workspace from `ds_users`, with `LIMIT 15
 | **Sessions (any)** | Sessions that touched this category at all. A session can count under several categories, so this column adds up to **more** than *Agent sessions*. | `ds_main` |
 | **Users** (activity and category tables) | Distinct session owners in that group | `ds_main` |
 | **Agent actions** (activity and category tables) | Number of category actions. Background events are excluded. | `ds_main` |
-| **Errors / Error rate** (activity and category tables) | Category actions with status 400 or above, and that count as a share of actions | `ds_main` |
+| **Errors / Error rate** (activity and category tables) | Failed category actions (HTTP 4xx/5xx and failed cells), and that count as a share of actions | `ds_main` |
+| **Failed cell rate** | Failed agent-run cells / agent-run cells | `ds_main` |
+| **Sessions with an error** | Share of sessions with at least one actionable error | `ds_main` |
+| **Actionable errors** | Failed events excluding expected background probes | `ds_errors` |
+| **Genie Code DBUs** | All Genie Code DBUs, including free tier | `ds_cost` |
+| **DBUs per user** | Genie Code DBUs ÷ users with any DBUs | `ds_cost` |
 | **Active agent minutes** / **Active min** | Sum of session active minutes, i.e. distinct minutes with any agent event | `ds_main` |
 | **Duration min** | Last event minute − first event minute + 1 | `ds_main` |
 | **Agent actions** (session log) | All agent events in the session, including background events | `ds_main` |
-| **Errors** (session log) | All errors in the session, including background events | `ds_main` |
+| **Actionable errors** (session log) | All actionable errors in the session, including on background events | `ds_main` |
+| **Cells failed** (session log) | Failed `runCommand` events | `ds_main` |
 | **Cells run** | `runCommand` events, any language | `ds_main` |
 | **Notebooks created** | Create or import notebook events | `ds_main` |
 
@@ -309,7 +403,7 @@ This dataset is the distinct users per workspace from `ds_users`, with `LIMIT 15
 | **Multi-category sessions** | Sessions by number of categories touched: 0 (read-only), 1, 2 or 3+. Sessions with 2 or more categories are multi-step workflows, e.g. explore the catalog, then write code, then build a dashboard. |
 | **Category mix by surface** | 100% stacked bar: the share of each primary category per surface |
 | **Session depth (active minutes)** | Sessions per active-minute bucket, coloured by primary category |
-| **Agent activities by category** | Table, one row per category × activity: Sessions, Users, Workspaces, Agent actions, Errors, Error rate |
+| **Agent activities by category** | Table, one row per category × activity: Sessions, Users, Workspaces, Agent actions. Errors by activity are on Errors & Fixes (*Where errors happen*). |
 
 All of these use `ds_main`.
 
@@ -318,14 +412,15 @@ All of these use `ds_main`.
 | Visual | Shows | Dataset |
 |---|---|---|
 | **Sessions by workspace and primary category** | Pivot table with workspaces as rows (most sessions first), primary categories as columns, and session counts colour-scaled | `ds_main` |
-| **User directory** | One row per user. Top category and Primary workspace cover all history; every other column follows the filters. | `ds_main` |
-| **Top 15 workspaces by active users** | Distinct users per workspace, all clients | `ds_top_ws_users` |
+| **User scorecard** | One row per user, most DBUs first, with a suggested action ([section 5](#ds_actions-and-ds_user_actions-action-items-and-user-scorecard)). Every column follows the filters. It's built in its own query, so it doesn't respond to clicks on the pivots; use the filters. | `ds_user_actions` |
+| **Sessions by user and primary category** | Pivot, users × primary categories, session counts colour-scaled. For one user's per-category minutes, actions and errors, use User Detail. | `ds_main` |
 
-User directory columns:
-- User, Top category, Primary workspace
+User scorecard columns:
+- User, Suggested action, Top category, Primary workspace (both within the filtered period)
 - Sessions, Action rate, Active days (days with a session)
 - First seen (retained data), Last seen. *First seen* is the earliest session still in the data, not necessarily the user's first use.
-- Active min, Cells run, Notebooks created, Workspaces
+- Active min, Cells run, Failed cell rate, Notebooks created
+- Actionable errors, Top error cause, DBUs, DBUs / session
 
 ### User Detail: one person's profile
 
@@ -337,15 +432,44 @@ Pick one or more users with the **User(s)** picker at the top right. With nobody
 | **Sessions that took action** (KPI) | Action rate | `ds_main` |
 | **Active agent minutes** (KPI) | Sum of session active minutes | `ds_main` |
 | **Active days** (KPI) | Days with any Genie Code event | `ds_users` |
+| **Genie Code DBUs** (KPI) | The picked users' DBUs | `ds_cost` |
+| **Failed cell rate** (KPI) | The picked users' failed cells | `ds_main` |
+| **Actionable errors** (KPI) | The picked users' actionable errors | `ds_errors` |
+| **Suggested action** | From the User scorecard, most DBUs first: suggested action, top error cause, retry sessions, 60+ min sessions, DBUs per session (the rest is in the KPI tiles) | `ds_user_actions` |
 | **Category mix** | Donut: the picked users' sessions by primary category. Clicking a slice filters the page to that category. | `ds_main` |
 | **Workspaces and surfaces used** | Sessions per workspace × surface | `ds_main` |
+| **Category breakdown** | Per category: Sessions (primary), Sessions (any), Active min, Agent actions, Errors, Error rate. Clicking a row filters only this table. | `ds_user_categories` |
+| **Errors and how to reduce them** | The picked users' error causes with fixes | `ds_errors` |
 | **Session log** | Every session, newest first, with the columns below | `ds_main` |
 
 Session log columns:
 - Started (UTC), User, Workspace, Surface
 - Primary category, All categories
-- Active min, Duration min, Agent actions, Cells run, Notebooks created, Errors
+- Active min, Duration min, Agent actions, Cells run, Notebooks created, Cells failed, Actionable errors
 - Session ID
+
+### Errors & Fixes: why actions fail
+
+| Visual | Shows | Dataset |
+|---|---|---|
+| **Failed cell rate**, **Sessions with an error** (KPIs) | Error rates. The category error rate is in the Overview *Category summary*. | `ds_main` |
+| **Actionable errors** (KPI) | Count of actionable errors | `ds_errors` |
+| **Error causes and how to reduce them** | One row per cause: errors, sessions, users, why it happens, how to reduce it. Click a row to filter the page. | `ds_errors` |
+| **Monthly errors by cause group** | Stacked bar | `ds_errors` |
+| **Failed cell rate by month** | Line | `ds_main` |
+| **Where errors happen** | Category × activity × cause | `ds_errors` |
+| **Errors by user and cause group** | Pivot, users × cause groups | `ds_errors` |
+
+### Action Items & DBUs: what to do next
+
+| Visual | Shows | Dataset |
+|---|---|---|
+| **Genie Code DBUs**, **DBUs per user**, **Billable share of DBUs** (KPIs) | DBUs for the filtered period | `ds_cost` |
+| **Action items** | Findings with priority, evidence, why, and what to do ([section 5](#ds_actions-and-ds_user_actions-action-items-and-user-scorecard)) | `ds_actions` |
+| **Monthly Genie Code DBUs by category** | Stacked bar of allocated DBUs, including *Chat only* | `ds_cost` |
+| **DBUs by user and category** | Pivot of allocated DBUs, users × categories. The column totals give DBUs by category. | `ds_cost` |
+
+Per-user suggested actions are in the **User scorecard** on Workspaces & Users.
 
 ### Category colours
 
@@ -368,24 +492,24 @@ The colours are the same on every page:
 
 ### Which filters reach which datasets
 
-| Filter (Filters page) | `ds_users` (user counts) | `ds_main` (sessions) | `ds_top_ws_users` (Top 15 bar) |
-|---|---|---|---|
-| Date | `event_date` | `session_date` | parameter |
-| Workspace | ✓ | ✓ | parameter |
-| User | ✓ | ✓ | parameter |
-| User type (default **Human**) | ✓ | ✓ | parameter |
-| Surface | — | ✓ | — |
-| Primary category | — | ✓ | — |
-| Client type (users) | ✓ | — | parameter |
-| **User(s)** picker (User Detail page only) | ✓ | ✓ | — |
+| Filter (Filters page) | `ds_users` (user counts) | `ds_main` (sessions), `ds_user_categories` | `ds_errors` | `ds_cost` | `ds_actions`, `ds_user_actions` |
+|---|---|---|---|---|---|
+| Date | `event_date` | `session_date` | `session_date` | `usage_date` | parameter |
+| Workspace | ✓ | ✓ | ✓ | ✓ (billing workspace) | parameter |
+| User | ✓ | ✓ | ✓ | ✓ | parameter |
+| User type (default **Human**) | ✓ | ✓ | ✓ | ✓ | parameter |
+| Surface | — | ✓ | ✓ | — | — |
+| Primary category | — | ✓ | ✓ | `cost_category` | parameter |
+| Client type (users) | ✓ | — | — | — | — |
+| **User(s)** picker (User Detail page only) | ✓ | ✓ | ✓ | ✓ | `ds_user_actions` (field) |
 
 `ds_users` comes from `assistant_events`, which has no surface or category. So the **Surface** and **Primary category** filters don't change the user-count visuals. Likewise, **Client type** only affects the user counts.
 
 ### Cross-filtering
 
-Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visuals on the same page filter to that selection. For example, click a workspace in the pivot and the user directory narrows to that workspace.
+Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visuals on the same page filter to that selection. For example, click a workspace in the workspace pivot and the user pivot narrows to that workspace.
 - Line charts and KPI tiles don't start cross-filters, but they do respond to them.
-- The user-count visuals and the Top 15 workspaces bar use other datasets, so clicks don't filter them, and clicking them doesn't filter anything else.
+- The user-count visuals, action items and User scorecard use other datasets, so clicks don't filter them, and clicking them doesn't filter anything else. Error and DBU visuals cross-filter only among themselves.
 
 ---
 
@@ -395,12 +519,16 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 |---|---|
 | *Active users* is higher than the number of users in the session visuals | The two have different sources. *Active users* counts anyone with a Genie Code interaction, including plain chat that never triggers an agent action. Session visuals count only owners of agent sessions. |
 | *Sessions (any)* adds up to more than *Agent sessions* | A session counts once for each category it touches. *Sessions (primary)* adds up exactly. |
+| Per-category *Active min* adds up to more than the user's *Active agent minutes* | A minute with actions in two categories counts once in each. Within one category, each minute counts once. |
 | Session log *Agent actions* is higher than the activity table's | The session log includes background events; the activity table counts category actions only. |
 | *Duration* is longer than *active minutes* | Duration includes idle gaps between the first and last event. Active minutes counts only minutes with activity. |
 | Monthly active users goes back further than sessions | `assistant_events` keeps about a year; agent audit events start later ([section 2](#how-far-back-the-data-goes)). |
 | The first and last months look low | They're partial months. The current month runs only to yesterday. |
 | The heatmap peak looks shifted | All times are UTC. |
 | Today is missing | The views refresh once a day, overnight UTC. |
+| Raw error counts in the audit log are far higher than *Actionable errors* | Expected background probes are excluded. |
+| Error rates rose after the October 2026 update | Failed notebook cells (status `1`) and failed git calls now count as errors; before, only status 400+ did. |
+| DBUs by category are mostly *Chat only* | Most DBUs are on user-days with no agent tool calls ([`gc_cost`](#gc_cost)). |
 | Totals change when *User type* includes Automated / eval | Service principals and high-volume user-days (more than 50 sessions) are hidden by default. |
 
 ---
@@ -416,7 +544,10 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 - **The oldest edge moves.** Once audit retention passes the fixed July 2026 lower bound, the earliest day drops out each day. A session that straddles that day loses its first events, so its start, duration and primary category can change. Sessions last minutes, so very few are affected.
 - **User type is weaker before July 2026.** Earlier user-days can only be flagged as automated if the identity isn't an email (see [section 5](#5-dashboard-datasets)), so older months of the user counts may include some eval traffic.
 - **Refresh order is by timing, not guaranteed.** If one view's refresh runs for more than about two hours, the next view reads the previous day's data.
-- **Privacy.** System tables are account-wide, so the dashboard shows individual user emails from every workspace. It's published without embedded credentials: each viewer needs `SELECT` on the four views and access to the warehouse.
+- **DBUs by session and category are an estimate.** Billing is per workspace, user and hour with no session ID, so DBUs are split across the user's sessions by active minutes, matching the workspace where possible.
+- **Agent compute isn't in the DBUs.** Cells the agent runs bill to the notebook's compute (serverless or cluster) like any other run, and can't be told apart from the user's own runs in billing.
+- **Advice is generic.** The *how to reduce it* text and action-item thresholds are rules of thumb in `build_dashboard.py`; tune them for your organisation.
+- **Privacy.** System tables are account-wide, so the dashboard shows individual user emails from every workspace. It's published without embedded credentials: each viewer needs `SELECT` on the six views, access to the warehouse, and the views read `system.billing`.
 
 ---
 
@@ -438,3 +569,7 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 | **Action rate** | Share of sessions that aren't Q&A / Read-only |
 | **Account-level** | A session whose actions all had `workspace_id = 0` |
 | **Automated / eval** | Sessions owned by a non-email identity, or user-days with more than 50 sessions |
+| **Actionable error** | A failed agent event that isn't an expected background probe |
+| **Expected background probe** | An agent existence check (file, credential, connection) whose "not found" answer is normal |
+| **Retry session** | A session with 3 or more failed cells |
+| **Chat only** | Genie Code DBUs on a user-day with no agent session |
