@@ -264,7 +264,7 @@ The views cover as much as the system tables retain. Events that age out of a sy
 |---|---|
 | `assistant_events` | About 1 year (the table's retention) |
 | `billing.usage` | As long as billing retains |
-| Genie Code agent events in `audit` | From when the agent's user agent first appears in the account (2 July 2026 in the reference account) |
+| Genie Code agent events in `audit` | From when the agent's user agent first appears in the account |
 
 **Common window.** The dashboard lines these up. Every dataset starts on the first agent session date, `min(session_date)` in `gc_sessions`. That cut-off is applied to `ds_users`, `ds_cost` and the DBU part of `ds_actions` / `ds_user_actions`; the session-based datasets start there anyway. So user counts, DBUs and sessions all cover the same period, and earlier user and billing history stays in the views but isn't shown.
 
@@ -327,7 +327,7 @@ Each failed event also gets an **error cause**, again first match wins. The dash
 
 | Error cause | Rule | Cause group |
 |---|---|---|
-| *Expected background probe* | `wsfsStreamingRead` 404; `getUserMappedCredential` 404, or any error for a built-in connector credential (`system_ai_agent_slack_mcp`, `..._github_mcp`, `..._gmail` and so on, which the agent checks in every session); a `ucHttpConnectionProxiedRequest` 404 to a built-in connector connection such as `system_ai_agent_glean_mcp` (checked at the start of about a third of sessions); `getConnection` for a `system.ai.*` connection, the `databricks-package-management` secret scope, `getEntityTagAssignment` 404. The agent checks for things that usually don't exist; "not found" is the normal answer. | Not actionable; excluded everywhere |
+| *Expected background probe* | `wsfsStreamingRead` 404; `getUserMappedCredential` 404, or any error for a built-in connector credential (`system_ai_agent_slack_mcp`, `..._github_mcp`, `..._gmail` and so on, which the agent checks in every session); a `ucHttpConnectionProxiedRequest` 404 to a built-in connector connection such as `system_ai_agent_glean_mcp` (checked at the start of many sessions); `getConnection` for a `system.ai.*` connection, the `databricks-package-management` secret scope, `getEntityTagAssignment` 404. The agent checks for things that usually don't exist; "not found" is the normal answer. | Not actionable; excluded everywhere |
 | Wrong compute for cell language | `runCommand` failing with "SQL warehouses only support executing SQL cells" | Compute & conflicts |
 | Cell cancelled or skipped | `runCommand` with `CommandCancelledException` / `CommandSkippedException` | Failed cells |
 | SQL cell failed / Python / code cell failed | Any other failed `runCommand`, split by `commandLanguage` | Failed cells |
@@ -348,7 +348,7 @@ Each failed event also gets an **error cause**, again first match wins. The dash
 | Platform / service error | Any other status 500 and above, mostly timeouts | Other |
 | Other request error | Anything else | Other |
 
-In the reference account about 97% of raw error events are expected probes, which is why they're excluded from every rate.
+Expected probes are usually the large majority of raw error events, which is why they're excluded from every rate.
 
 ### Output grain
 
@@ -419,7 +419,7 @@ Each row also carries the session's workspace, owner, user type, surface and pri
 
 `gc_cost` (`sql/06`) reads Genie Code DBUs from `system.billing.usage`. `is_free` marks the `GENIE_FREE_USAGE` SKU; free-tier DBUs are counted like any other. The dashboard shows DBUs only, not dollars.
 
-Billing has no session ID, so DBUs are **allocated**. Each billing row (workspace × user × day) is split across that user's agent sessions in the **same workspace** that day, in proportion to their active minutes, and each piece takes the session's primary category. If the user had no session in that workspace that day, the row is split across their sessions in any workspace that day instead; it keeps the billing workspace, so the session's own workspace can differ. User-days with DBUs but no agent session keep one row with category **Chat only (no agent actions)**. That's most of the DBUs in the reference account (about three quarters), because most Genie Code turns answer in chat without calling a tool. Totals add up exactly; only the split by session and category is an estimate.
+Billing has no session ID, so DBUs are **allocated**. Each billing row (workspace × user × day) is split across that user's agent sessions in the **same workspace** that day, in proportion to their active minutes, and each piece takes the session's primary category. If the user had no session in that workspace that day, the row is split across their sessions in any workspace that day instead; it keeps the billing workspace, so the session's own workspace can differ. User-days with DBUs but no agent session keep one row with category **Chat only (no agent actions)**. That's often most of the DBUs, because most Genie Code turns answer in chat without calling a tool. Totals add up exactly; only the split by session and category is an estimate.
 
 ---
 
@@ -433,7 +433,7 @@ These are the rows of `gc_daily_users`, plus a `user_type` column:
 - **Automated / eval** if the user is null or not an email address, or if `gc_sessions` flagged that user on that day as automated / eval
 - **Human** otherwise
 
-The session-based flag only exists where there's agent data (from July 2026). Earlier user-days can only be flagged by the non-email rule, so a high-volume eval account counts as Human there. An events-per-day threshold doesn't work as a substitute, because heavy agent-mode users also log thousands of events a day. In the reference account the effect is small: only 14 of about 22,800 user-days before July 2026 had more than 1,000 events.
+The session-based flag only exists where there's agent data (from when agent events start). Earlier user-days can only be flagged by the non-email rule, so a high-volume eval account counts as Human there. An events-per-day threshold doesn't work as a substitute, because heavy agent-mode users also log thousands of events a day. In practice few user-days have that many events, so the effect is small.
 
 This way the *User type* filter applies to the user counts too. Rows before the first agent session date are left out ([common window](#how-far-back-the-data-goes)), so user counts cover the same period as sessions.
 
@@ -509,7 +509,7 @@ Both aggregate across `gc_sessions`, `gc_session_errors` and `gc_cost` inside SQ
 
 `ds_user_actions` (the **User scorecard**) returns one row per user, including users with DBUs but no agent sessions, with primary workspace, top category, active days, first and last seen, notebooks created, workspaces, sessions, action rate, failed cell rate, retry and 60+ minute sessions, actionable errors and top cause, DBUs and DBUs per session.
 
-**Suggested action** is the first rule below that applies. **Also consider** lists the labels of the other rules that apply, so a second problem isn't hidden. Each message quotes the user's own numbers and, for rates, the rate across all filtered sessions, for example *"Retry loops: 28 of 326 sessions had 3+ failed cells (9% vs 3% overall). When a step fails twice, give the agent the error and a smaller step."*
+**Suggested action** is the first rule below that applies. **Also consider** lists the labels of the other rules that apply, so a second problem isn't hidden. Each message quotes the user's own numbers and, for rates, the rate across all filtered sessions, for example *"Retry loops: 12 of 80 sessions had 3+ failed cells (15% vs 3% overall). When a step fails twice, give the agent the error and a smaller step."*
 
 | Order | Rule | Applies when |
 |---|---|---|
@@ -608,7 +608,7 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 | The latest day looks low | The views refresh once a day, overnight UTC, so the latest day only holds the events up to the refresh. The latest week and month are partial for the same reason. |
 | Raw error counts in the audit log are far higher than *Actionable errors* | Expected background probes are excluded. |
 | Error rates rose after the October 2026 update | Failed notebook cells (status `1`) and failed git calls now count as errors; before, only status 400+ did. |
-| Errors and *External tool / MCP call failed* dropped sharply after the 13 November 2026 update | The agent's check for built-in connectors such as `system_ai_agent_glean_mcp` (a 404 at the start of about a third of sessions) is now an expected background probe. *Dashboard request rejected* was split into five dashboard causes, and *Invalid settings or missing resource* and *Agent internal error* were added. |
+| Errors and *External tool / MCP call failed* dropped sharply after the 13 November 2026 update | The agent's check for built-in connectors such as `system_ai_agent_glean_mcp` (a 404 at the start of many sessions) is now an expected background probe. *Dashboard request rejected* was split into five dashboard causes, and *Invalid settings or missing resource* and *Agent internal error* were added. |
 | DBUs by category are mostly *Chat only* | Most DBUs are on user-days with no agent tool calls ([`gc_cost`](#gc_cost)). |
 | Totals change when *User type* includes Automated / eval | Service principals and high-volume user-days (more than 50 sessions) are hidden by default. |
 
@@ -623,12 +623,12 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 - **Session data depends on the `sid/` tag.** Agent events without one are excluded from sessions.
 - **History is limited by system table retention.** Data that ages out of a system table drops out of the views. Keeping it longer would require writing to tables that append each day.
 - **The oldest edge moves.** Once audit retention passes the fixed July 2026 lower bound, the earliest day drops out each day. A session that straddles that day loses its first events, so its start, duration and primary category can change. Sessions last minutes, so very few are affected.
-- **User type is weaker before July 2026.** Earlier user-days can only be flagged as automated if the identity isn't an email (see [section 7](#7-dashboard-datasets)), so older months of the user counts may include some eval traffic.
+- **User type is weaker before agent events start.** Earlier user-days can only be flagged as automated if the identity isn't an email (see [section 7](#7-dashboard-datasets)), so older months of the user counts may include some eval traffic.
 - **Refresh order is by timing, not guaranteed.** If one view's refresh runs for more than about two hours, the next view reads the previous day's data.
 - **DBUs by session and category are an estimate.** Billing is per workspace, user and hour with no session ID, so DBUs are split across the user's sessions by active minutes, matching the workspace where possible.
 - **Agent compute isn't in the DBUs.** Cells the agent runs bill to the notebook's compute (serverless or cluster) like any other run, and can't be told apart from the user's own runs in billing.
 - **Failed cells have no recorded reason.** The audit log stores failed `runCommand` events as `InnerExecutionException: null`, so *Python / code cell failed* and *SQL cell failed* can't be split by root cause, and their advice lists the common reasons.
-- **Some lookups may be misfiled.** In the reference account about 300 *not found* errors are lookups of `otel` trace tables across 44 tables and 30 users. They couldn't be confirmed as automatic, so they still count.
+- **Some lookups may be misfiled.** Some *not found* errors are lookups of `otel` trace tables that span many tables and users. They couldn't be confirmed as automatic, so they still count.
 - **Advice and thresholds are rules of thumb.** The *how to reduce it* text, the action-item thresholds and the suggested-action rules are in `build_dashboard.py` (`ERROR_FIXES`, `ACTIONS_SQL`, `SUGGESTION_RULES`); tune them for your organisation.
 - **Privacy.** System tables are account-wide, so the dashboard shows individual user emails from every workspace. It's published without embedded credentials: each viewer needs `SELECT` on the six views, access to the warehouse, and the views read `system.billing`.
 

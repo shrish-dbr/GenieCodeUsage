@@ -63,7 +63,7 @@ All six cover as much history as the system tables retain (`02` reads audit even
 
 ### Errors and DBUs
 
-- **Errors** are agent events with HTTP status 400 or above, or a gRPC-style code from 1 to 199. That includes failed notebook cells, which the audit log records as `runCommand` with status `1` rather than 400+. Each error gets one of 19 causes, such as a failed cell, a table not found, permission denied, an external tool failure, a rate limit, a write conflict or one of five dashboard causes, each with why it happens and how to reduce it. The agent's routine existence checks (files, credentials, built-in connectors such as `system_ai_agent_glean_mcp`, `system.ai` connections) return "not found" by design; they are labelled *Expected background probe* and left out of every number. About 97% of raw agent error events are such checks.
+- **Errors** are agent events with HTTP status 400 or above, or a gRPC-style code from 1 to 199. That includes failed notebook cells, which the audit log records as `runCommand` with status `1` rather than 400+. Each error gets one of 19 causes, such as a failed cell, a table not found, permission denied, an external tool failure, a rate limit, a write conflict or one of five dashboard causes, each with why it happens and how to reduce it. The agent's routine existence checks (files, credentials, built-in connectors such as `system_ai_agent_glean_mcp`, `system.ai` connections) return "not found" by design; they are labelled *Expected background probe* and left out of every number. In a typical account these checks are the large majority of raw agent error events.
 - **DBUs** are Genie Code usage from `system.billing.usage` (`usage_metadata.genie.surface = 'GENIE_CODE'`), free tier included. The dashboard shows DBUs only, never dollars. Billing has no session ID, so each workspace's user-day DBUs are split across that user's sessions in the same workspace by active minutes (or across that day's sessions in any workspace if there were none there). DBUs on days without agent sessions show as *Chat only (no agent actions)*.
 
 ### Dashboard pages
@@ -142,7 +142,7 @@ python3 deploy.py ... --dashboard-id <dashboard-id>                 # update a d
 
 - **Categories describe what the agent did, not what the user asked.** No system table holds Genie Code prompts or replies.
 - **Python can't be split by purpose.** `commandText` in the audit log is redacted, so every Python cell counts as Code Development; SQL cells are identified from `commandLanguage`.
-- **History starts with the agent.** Every visual starts when Genie Code agent events first appear in the audit log (2 July 2026 in the reference account). `assistant_events` and billing keep longer history, which stays in the views but is left off the dashboard so all numbers cover the same period.
+- **History starts with the agent.** Every visual starts when Genie Code agent events first appear in the audit log in your account. `assistant_events` and billing keep longer history, which stays in the views but is left off the dashboard so all numbers cover the same period.
 - **DBUs by session and category are an estimate.** Compute for cells the agent runs bills to the notebook's compute and isn't included.
 - **New action types need a rule.** Agent actions not covered by the rules in `sql/02_gc_agent_activity_mv.sql` fall into *Context / Background* until one is added.
 - **Failed cells have no recorded reason.** The audit log doesn't store the exception, so failed cells can't be split by root cause.
