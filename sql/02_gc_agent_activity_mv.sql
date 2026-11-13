@@ -22,6 +22,7 @@ WITH src AS (
     a.request_params.json_rpc_method AS rpc_method,
     a.request_params.fully_qualified_name AS mcp_server,
     a.request_params.name_arg AS credential_name,
+    a.request_params.connection_name AS connection_name,
     a.response.status_code AS status_code,
     a.response.error_message AS error_message
   FROM system.access.audit a
@@ -78,6 +79,8 @@ classified AS (
       WHEN NOT is_error THEN NULL
       WHEN service_name = 'workspaceFiles' AND action_name = 'wsfsStreamingRead' AND status_code = 404 THEN 'Expected background probe'
       WHEN action_name = 'getUserMappedCredential' AND (status_code = 404 OR credential_name LIKE 'system_ai_agent%') THEN 'Expected background probe'
+      -- At session start the agent checks its built-in connectors (e.g. system_ai_agent_glean_mcp); 404 = not set up.
+      WHEN action_name = 'ucHttpConnectionProxiedRequest' AND status_code = 404 AND connection_name LIKE 'system_ai_agent%' THEN 'Expected background probe'
       WHEN action_name = 'getConnection' AND error_message LIKE '%system.ai.%' THEN 'Expected background probe'
       WHEN service_name = 'secrets' AND error_message LIKE '%databricks-package-management%' THEN 'Expected background probe'
       WHEN action_name = 'getEntityTagAssignment' AND status_code = 404 THEN 'Expected background probe'
@@ -93,8 +96,17 @@ classified AS (
       WHEN status_code = 403 OR error_message LIKE '%PERMISSION_DENIED%' THEN 'Permission denied'
       WHEN service_name IN ('ucHttpConnection','mcpService') OR action_name IN ('getMcpService','listMcpServices') THEN 'External tool / MCP call failed'
       WHEN action_name = 'attachNotebook' THEN 'Notebook compute busy'
-      WHEN service_name IN ('dashboards','pages') THEN 'Dashboard request rejected'
+      WHEN action_name = 'mintOAuthToken' AND error_message LIKE 'Browser Fleet sessions cannot be exchanged%' THEN 'Agent internal error'
+      WHEN service_name IN ('dashboards','pages') AND error_message LIKE '%Dataset query is not supported%' THEN 'Dashboard query not supported'
+      WHEN service_name IN ('dashboards','pages') AND error_message RLIKE 'warehouse .* was not found' THEN 'Dashboard warehouse not found'
+      WHEN service_name IN ('dashboards','pages') AND error_message RLIKE 'Unable to find (published dashboard|widget|resource)|does not exist|no longer available'
+        THEN 'Dashboard or widget not found'
+      WHEN service_name IN ('dashboards','pages') AND error_message RLIKE 'etag|position diffs|ALREADY_EXISTS|must be unique'
+        THEN 'Dashboard edit conflict'
+      WHEN service_name IN ('dashboards','pages') THEN 'Dashboard definition rejected'
       WHEN status_code = 409 OR error_message LIKE '%already exists%' THEN 'Write conflict'
+      WHEN status_code >= 500 AND error_message RLIKE 'INVALID_PARAMETER_VALUE|INVALID_STATE|RESOURCE_DOES_NOT_EXIST|NOT_FOUND|BAD_REQUEST|MAX_CHILD_NODE_SIZE_EXCEEDED|GIT_'
+        THEN 'Invalid settings or missing resource'
       WHEN status_code >= 500 THEN 'Platform / service error'
       ELSE 'Other request error'
     END AS error_cause
