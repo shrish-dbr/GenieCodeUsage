@@ -65,7 +65,8 @@ SELECT
     WHEN 'embed' THEN 'Embedded'
     WHEN 'document' THEN 'Document'
     WHEN 'viz' THEN 'Visualization'
-    ELSE coalesce(s.agent_context, 'Unknown')
+    WHEN 'designer' THEN 'Designer'
+    ELSE coalesce(initcap(replace(s.agent_context, '-', ' ')), 'Unknown')
   END AS surface,
   CASE
     WHEN o.user_email NOT LIKE '%@%' THEN 'Automated / eval'

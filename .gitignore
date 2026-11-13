@@ -3,3 +3,5 @@
 __pycache__/
 .dashboard_id
 build/
+# Genie Code instruction files: kept local, not published with the repo
+genie_code/

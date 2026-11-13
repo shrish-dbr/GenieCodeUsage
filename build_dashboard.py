@@ -30,6 +30,16 @@ def ql(sql):
     return [line + "\n" for line in sql.strip().split("\n")]
 
 
+# Common window: every dataset starts on the first agent session date, so user counts and DBUs cover the same
+# period as the session visuals. assistant_events and billing retain longer than agent audit events exist; without
+# this, user-count and DBU KPIs would include months that have no sessions behind them.
+WINDOW_START = "(SELECT min(session_date) FROM gc_sessions)"
+
+
+def in_window(date_col):
+    return f"{date_col} >= {WINDOW_START}"
+
+
 # user_type for gc_daily_users rows: non-email identities, plus user-days that gc_sessions flags as
 # automated / eval, so the "User type" filter applies to the user-count KPIs too.
 USERS_TYPED_SQL = """
@@ -40,6 +50,7 @@ users_typed AS (
               THEN 'Automated / eval' ELSE 'Human' END AS user_type
   FROM gc_daily_users d
   LEFT JOIN auto_days a ON d.user_email = a.user_email AND d.event_date = a.session_date
+  WHERE """ + in_window("d.event_date") + """
 )"""
 
 datasets = [
@@ -134,17 +145,13 @@ MONTH = lambda col: f(f"monthly({col})", f'DATE_TRUNC("MONTH", `{col}`)')
 
 
 def counter(name, title, desc, ds, value_field, period_col, display, fmt=None, p=None, filters=None):
-    # The headline value re-aggregates the per-period rows, which is only correct for additive
-    # measures (SUM). COUNT(DISTINCT) / AVG counters get no period, so they show the true total.
+    # Headline = the filtered period's total. No period encoding: with one, the tile shows only the latest
+    # week's value (often a partial week), not the total the title describes. period_col is kept for callers.
     value = {"fieldName": value_field["name"], "displayName": display}
     if fmt:
         value["format"] = fmt
-    fields, enc = [value_field], {"value": value}
-    if value_field["name"].startswith("sum("):
-        fields.append(WEEK(period_col))
-        enc["period"] = {"fieldName": f"weekly({period_col})"}
-    return {"widget": {"name": name, "queries": q(ds, fields, filters=filters),
-                       "spec": {"version": 2, "widgetType": "counter", "encodings": enc,
+    return {"widget": {"name": name, "queries": q(ds, [value_field], filters=filters),
+                       "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": value},
                                 "frame": frame(title, desc)}},
             "position": p}
 
@@ -177,29 +184,35 @@ def in_param(keyword, col):
 # views so it can change with a dashboard-only deploy.
 ERROR_FIXES = {
     "Python / code cell failed": (
-        "Failed cells", "Code the agent wrote and ran raised an exception: wrong column names, missing libraries, type errors or wrong assumptions about the data.",
+        "Failed cells", "Code the agent wrote and ran raised an exception. The audit log doesn't record the exception, so the exact "
+        "reason isn't known; common ones are wrong column names, missing libraries, type errors or wrong assumptions about the data.",
         "Give exact table and column names (@-mention the tables) and the expected output. Ask for one step at a time and run it before the next. When a cell fails, use Diagnose error (/fix) instead of re-prompting from scratch. Check the notebook compute has the libraries the code needs."),
     "SQL cell failed": (
-        "Failed cells", "SQL the agent ran failed: unresolved tables or columns, syntax errors or type mismatches.",
+        "Failed cells", "SQL the agent ran failed. The audit log doesn't record the error, so the exact reason isn't known; common "
+        "ones are unresolved tables or columns, syntax errors and type mismatches.",
         "@-mention the tables so the agent sees their schemas, state the filters and grain you want, and use /fix on the failed cell. Put common join keys and business definitions in Genie Code workspace instructions."),
     "Cell cancelled or skipped": (
         "Failed cells", "A run was stopped by the user, or a cell was skipped after an earlier cell failed.",
         "Usually user-initiated. If frequent, prompts are probably too broad: ask for smaller steps that finish quickly."),
     "Table / schema / catalog not found": (
-        "Names not found", "The agent guessed a name that does not exist, often <catalog>.default or a catalog from another workspace.",
+        "Names not found", "The agent guessed a name that does not exist, most often <catalog>.default or a catalog from another workspace.",
         "Reference tables with @, set the default catalog and schema (USE CATALOG / USE SCHEMA) before asking, and list the standard catalogs and schemas in Genie Code workspace instructions."),
     "Permission denied": (
-        "Access & auth", "The user lacks a privilege on the data or object the agent tried to read or change.",
-        "Grant USE CATALOG / USE SCHEMA / SELECT (or BROWSE for discovery) on the data users work with, or tell users which governed tables they can use."),
+        "Access & auth", "The user lacks a privilege on the data or object the agent tried to read or change. Some catalogs are "
+        "bound to other workspaces and can't be used from this one, and GitHub calls fail when the Databricks GitHub app can't reach the repository.",
+        "Grant USE CATALOG / USE SCHEMA / SELECT (or BROWSE for discovery) on the data users work with, or tell users which governed tables they can use. "
+        "If the catalog 'is not accessible in current workspace', ask an admin to add a workspace binding. For GitHub, a repository admin must give the Databricks GitHub app access."),
     "External connection auth failed": (
         "Access & auth", "Per-user OAuth credentials for an external connection or MCP server are missing or expired.",
         "Have users sign in to the connection again (user-mapped credentials) and confirm the OAuth app's scopes and secret are still valid."),
     "External tool / MCP call failed": (
-        "External tools", "A call through a Unity Catalog HTTP connection or MCP server returned an error: missing endpoint, bad request or server down.",
-        "Check the connection URL and path in Catalog Explorer, remove MCP servers that are no longer used from Genie Code settings, and test the server outside Genie Code."),
+        "External tools", "A call to an external tool or MCP server failed: the tool isn't connected for this user (for example Gmail), "
+        "its sign-in expired, or the server returned an error or was busy.",
+        "Reconnect the tool for the user (sign in again), remove MCP servers that are no longer used from Genie Code settings, and test the server outside Genie Code if it keeps failing."),
     "Rate limited": (
-        "External tools", "Too many requests to a model, MCP server or API in a short time.",
-        "Avoid running many agent tasks in parallel and space out bulk requests. Ask an admin to review AI Gateway and endpoint rate limits."),
+        "External tools", "Too many requests in a short time. Most are organisation-wide Databricks API limits, including Unity "
+        "Catalog; some come from a model, MCP server or external API.",
+        "Usually transient: wait and retry. Avoid running many agent tasks in parallel and space out bulk requests. If it keeps happening, ask an admin which API is limited; for model or MCP limits, review AI Gateway and endpoint rate limits."),
     "Wrong compute for cell language": (
         "Compute & conflicts", "Python cells were run on a SQL warehouse, which only runs SQL.",
         "Attach Python notebooks to serverless or an all-purpose cluster. Keep SQL warehouses for SQL-only notebooks."),
@@ -209,14 +222,39 @@ ERROR_FIXES = {
     "Write conflict": (
         "Compute & conflicts", "The agent tried to create a file or notebook that already exists, or wrote a file that changed underneath it.",
         "Ask the agent to edit the existing file or give a new name, and avoid editing the same file in another tab while the agent works."),
-    "Dashboard request rejected": (
-        "Other", "A dashboard create, update or query call was rejected, for example an unsupported dataset query or conflicting widget changes.",
-        "Ask Genie Code to build dashboards on tables or views with plain SQL datasets, and don't edit the same dashboard in the UI while the agent changes it."),
+    "Dashboard edit conflict": (
+        "Compute & conflicts", "The dashboard changed while the agent was editing it (stale version, conflicting widget positions, "
+        "or a duplicate name or ID).",
+        "Don't edit the dashboard in the UI while the agent changes it. Ask the agent to reload the dashboard before editing again, and give new widgets and datasets unique names."),
+    "Dashboard query not supported": (
+        "Other", "A dashboard dataset or widget query used a form the dashboard engine doesn't run, for example more than one "
+        "statement, DDL, or syntax that only works in a notebook.",
+        "Ask for dashboard datasets as one plain SELECT over tables or views, and test the query in the SQL editor first."),
+    "Dashboard warehouse not found": (
+        "Other", "The dashboard points at a SQL warehouse that was deleted or that the user can't use.",
+        "Set the dashboard to an existing warehouse the user can use, then ask the agent again."),
+    "Dashboard or widget not found": (
+        "Other", "The agent referred to a dashboard, page or widget that doesn't exist: often a dashboard that was never published, "
+        "or IDs from an older version of the dashboard.",
+        "Publish the dashboard before asking about its published version, and ask the agent to reload the dashboard after you change it."),
+    "Dashboard definition rejected": (
+        "Other", "A dashboard change was invalid: for example a measure or field that doesn't match a dataset column, a widget "
+        "pointing at a missing dataset, or an invalid name.",
+        "Ask the agent to check field names against the dataset columns before saving, and keep dataset column names stable once widgets use them."),
+    "Invalid settings or missing resource": (
+        "Other", "A service rejected a request that can't succeed as sent: a folder that has reached its item limit, an unsupported "
+        "node type, a Git credential that no longer exists, uncommitted changes blocking a Git checkout, or a path, query or volume that doesn't exist.",
+        "Don't retry: fix the cause. Move or delete items in a full folder (or work in a subfolder), pick a supported node type or compute policy, "
+        "select a Git credential again, commit or discard changes before switching branches, or create the missing folder or volume first."),
+    "Agent internal error": (
+        "Other", "An internal step of the Genie Code agent failed (for example its browser tool could not get a token). "
+        "The user can't fix this.",
+        "No user action. If it happens often, report it to Databricks support with the workspace and time."),
     "Platform / service error": (
-        "Other", "A Databricks service returned a 5xx error.",
+        "Other", "A Databricks service timed out or returned a 5xx error.",
         "Usually transient, so retry. If one service keeps failing, raise a support ticket with the time and workspace."),
     "Other request error": (
-        "Other", "Other rejected requests, such as bad parameters or unsupported operations.",
+        "Other", "Other rejected requests, such as bad parameters, tag policy violations or unsupported operations.",
         "Check the activity in the session log. If a pattern recurs, add a rule for it in sql/02_gc_agent_activity_mv.sql."),
 }
 CAUSE_GROUPS = ["Failed cells", "Names not found", "Access & auth", "External tools", "Compute & conflicts", "Other"]
@@ -229,7 +267,8 @@ COST_CAT_SCALE = {"type": "categorical",
 
 
 def sql_str(v):
-    return "'" + v.replace("'", "''") + "'"
+    # Databricks SQL reads 'doesn''t' as two adjacent literals ("doesnt"), so escape with a backslash.
+    return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 FIXES_CTE = "fixes AS (SELECT * FROM VALUES\n  " + ",\n  ".join(
@@ -252,7 +291,8 @@ WHERE e.is_actionable""")},
 SELECT usage_date, workspace_name, user_email, user_type, session_id, cost_category,
        CASE WHEN is_free THEN 'Free tier' ELSE 'Billable' END AS billing_tier,
        dbus
-FROM gc_cost"""),
+FROM gc_cost
+WHERE """ + in_window("usage_date")),
      "columns": [
          {"displayName": "DBUs per user", "description": "Genie Code DBUs per user with any DBUs",
           "expression": "SUM(`dbus`) / NULLIF(COUNT(DISTINCT `user_email`), 0)"},
@@ -288,7 +328,7 @@ def scoped(table, date_col, category_col):
 
 SCOPED_CTES = f"""s AS ({scoped("gc_sessions", "session_date", "primary_category")}),
 e AS ({scoped("gc_session_errors", "session_date", "primary_category")} AND is_actionable),
-c AS ({scoped("gc_cost", "usage_date", "cost_category")})"""
+c AS ({scoped("gc_cost", "usage_date", "cost_category")} AND {in_window("usage_date")})"""
 
 # Data-driven action items: one row per finding that applies to the filtered period. Priority thresholds are
 # shares of sessions (errors, retries) or of DBUs (long sessions, concentration).
@@ -363,7 +403,7 @@ recs AS (
          format_string('The top 10%% of users (%,d of %,d) use %.1f%% of Genie Code DBUs (%,.0f of %,.0f DBUs).',
                        CAST(ceil(topu.users * 0.1) AS BIGINT), topu.users, 100 * top_share, top_share * dbus, dbus),
          'A few heavy users account for most of the DBUs.',
-         'Review the heaviest users in the User scorecard (Workspaces & Users page). Coach those with high error or retry rates; ask those with high action rates to share their prompts and workflows.',
+         'Review the heaviest users in the User scorecard (User Detail page). Coach those with high error or retry rates; ask those with high action rates to share their prompts and workflows.',
          topu.users
   FROM topu CROSS JOIN co WHERE topu.users >= 10 AND dbus > 0
   UNION ALL
@@ -375,10 +415,12 @@ recs AS (
          read_only
   FROM st WHERE read_only > 0
   UNION ALL
-  SELECT 3, 'Use it effectively', 'Chat-only DBUs',
-         format_string('%.1f%% of DBUs (%,.0f) are on user-days with no agent tool activity.', 100 * chat_dbus / dbus, chat_dbus),
-         'DBUs from answering and explaining in chat, with no actions taken in the workspace.',
-         'For hands-on tasks, invoke Genie Code in the notebook, file or SQL editor so it can edit and run code directly, rather than copying code out of chat.',
+  -- Same DBU-share bands as long sessions: chat is valid use, but where most DBUs go deserves attention.
+  SELECT CASE WHEN chat_dbus >= 0.3 * dbus THEN 1 WHEN chat_dbus >= 0.1 * dbus THEN 2 ELSE 3 END,
+         'Cut DBUs', 'Chat-only DBUs',
+         format_string('%.1f%% of DBUs (%,.0f of %,.0f) are on user-days with no agent tool activity.', 100 * chat_dbus / dbus, chat_dbus, dbus),
+         'Most of these DBUs come from chat answers and explanations with no actions in the workspace. That is fine for questions, but hands-on tasks done through chat use DBUs without the agent doing the work.',
+         'Check which heavy chat users do hands-on work (User scorecard on User Detail: Regular chat and Top-10% chat users). For those, invoke Genie Code in the notebook, file or SQL editor so it edits and runs code directly, and add workspace instructions so answers land in one turn.',
          0
   FROM co WHERE chat_dbus > 0 AND dbus > 0
   UNION ALL
@@ -394,6 +436,62 @@ SELECT CASE p WHEN 1 THEN 'High' WHEN 2 THEN 'Medium' ELSE 'Low' END AS priority
        area, topic, evidence, likely_cause, action, weight
 FROM recs"""
 
+# ---- User scorecard: suggested action ----
+# Rules are checked in this order; the first that applies is the suggested action and the rest are listed under
+# "Also consider". Each message quotes the user's own numbers, and rates are compared with all filtered sessions
+# (the t_* columns). format_string's %f needs DOUBLE, hence pct() and DBU.
+def pct(num, den):
+    return f"CAST(100 * ({num}) / nullif({den}, 0) AS DOUBLE)"
+
+
+DBU = "CAST(dbus AS DOUBLE)"
+R, L = RETRY_FAILED_CELLS, LONG_SESSION_MINUTES
+CHAT_TIP = "Check the use case; for hands-on tasks, use the agent in the notebook or editor."
+SUGGESTION_RULES = [  # (short label, condition, message expression)
+    ("Top-10% DBUs, all chat", "sessions = 0 AND dbu_rank >= 0.9",
+     f"format_string('Top-10%% DBUs, all chat: %,.0f DBUs on %d days with no agent actions. {CHAT_TIP}', {DBU}, dbu_days)"),
+    ("Regular chat, no agent use", "sessions = 0 AND dbu_rank < 0.9 AND dbu_days >= 5",
+     "format_string('Regular chat user: %d days, %,.0f DBUs, no agent actions. Show them that the agent can edit and "
+     f"run code for them in the notebook or editor.', dbu_days, {DBU})"),
+    ("Retry loops", "retry_sessions >= 3",
+     f"format_string('Retry loops: %d of %d sessions had {R}+ failed cells (%.0f%% vs %.0f%% overall). When a step "
+     f"fails twice, give the agent the error and a smaller step.', retry_sessions, sessions, "
+     f"{pct('retry_sessions', 'sessions')}, CAST(100 * t_retry AS DOUBLE))"),
+    ("Many failed cells", "cells_run >= 10 AND cells_failed >= 0.25 * cells_run",
+     "format_string('Many failed cells: %d of %d agent-run cells failed (%.0f%% vs %.0f%% overall). Give exact table "
+     "and column names, run one step at a time, and use /fix on a failed cell.', cells_failed, cells_run, "
+     f"{pct('cells_failed', 'cells_run')}, CAST(100 * t_fail AS DOUBLE))"),
+    ("Agent guesses names", "top_cause = 'Table / schema / catalog not found' AND actionable_errors >= 5",
+     "format_string('Agent guesses names: %d of %d actionable errors were tables, schemas or catalogs not found. "
+     "@-mention tables and set the default catalog and schema.', top_cause_errors, actionable_errors)"),
+    ("Permission errors", "top_cause = 'Permission denied' AND actionable_errors >= 5",
+     "format_string('Permission errors: %d of %d actionable errors were permission denied. Request access to the data "
+     "being used, or point the agent at tables the user can read.', top_cause_errors, actionable_errors)"),
+    ("External tool errors",
+     "top_cause IN ('External tool / MCP call failed', 'External connection auth failed') AND actionable_errors >= 5",
+     "format_string('External tool errors: %d of %d actionable errors came from external tools or connections. "
+     "Re-authenticate the connection or remove unused MCP servers.', top_cause_errors, actionable_errors)"),
+    ("Top-10% DBUs, mostly chat", "sessions > 0 AND dbu_rank >= 0.9 AND chat_dbus >= 0.8 * dbus",
+     f"format_string('Top-10%% DBUs, mostly chat: %.0f%% of %,.0f DBUs were on days with no agent actions. {CHAT_TIP}', "
+     f"{pct('chat_dbus', 'dbus')}, {DBU})"),
+    ("Long sessions", "sessions >= 5 AND long_sessions >= 0.3 * sessions",
+     f"format_string('Long sessions: %d of %d sessions ran over {L} active minutes (%.0f%% vs %.0f%% overall). Start a "
+     f"new chat for each task to cut context DBUs.', long_sessions, sessions, {pct('long_sessions', 'sessions')}, "
+     "CAST(100 * t_long AS DOUBLE))"),
+    ("Mostly Q&A", "sessions >= 5 AND acted < 0.3 * sessions",
+     "format_string('Mostly Q&A: %d of %d sessions took action (%.0f%% vs %.0f%% overall). Add workspace instructions "
+     f"or a Genie Agent for repeat questions.', acted, sessions, {pct('acted', 'sessions')}, CAST(100 * t_acted AS DOUBLE))"),
+]
+# Used only when no rule above applies, so a user with a problem is never also called effective.
+EFFECTIVE_RULE = ("sessions >= 5 AND acted >= 0.6 * sessions AND cells_failed < 0.1 * greatest(cells_run, 1)",
+                  "format_string('Effective user: %d of %d sessions took action (%.0f%% vs %.0f%% overall) and %.0f%% of "
+                  "cells failed. Share their prompts and workflows with the team.', acted, sessions, "
+                  f"{pct('acted', 'sessions')}, CAST(100 * t_acted AS DOUBLE), coalesce({pct('cells_failed', 'cells_run')}, 0))")
+FALLBACK_CHAT = f"format_string('Occasional chat: %d day(s), %,.0f DBUs, no agent actions yet. No action needed.', dbu_days, {DBU})"
+FALLBACK_LITTLE = "format_string('Too little activity to assess: %d session(s) in this period.', sessions)"
+FALLBACK_NONE = ("format_string('No action needed: %d sessions, %.0f%% took action, %.0f%% of cells failed.', sessions, "
+                 f"{pct('acted', 'sessions')}, coalesce({pct('cells_failed', 'cells_run')}, 0))")
+
 USER_ACTIONS_SQL = "WITH " + SCOPED_CTES + """,
 us AS (SELECT user_email, count(*) AS sessions, count_if(primary_category <> '""" + READ_ONLY + """') AS acted,
               sum(active_minutes) AS minutes, sum(cells_run) AS cells, sum(cells_failed) AS cells_failed,
@@ -408,12 +506,19 @@ uws AS (SELECT user_email, max_by(workspace_name, n) AS primary_workspace
 utop AS (SELECT user_email, max_by(primary_category, n) AS top_category
          FROM (SELECT user_email, primary_category, count(*) AS n FROM s
                WHERE primary_category <> '""" + READ_ONLY + """' GROUP BY ALL) GROUP BY user_email),
-ue AS (SELECT user_email, sum(errors) AS errors, max_by(error_cause, errors) AS top_cause
+ue AS (SELECT user_email, sum(errors) AS errors, max_by(error_cause, errors) AS top_cause, max(errors) AS top_cause_errors
        FROM (SELECT user_email, error_cause, sum(errors) AS errors FROM e GROUP BY ALL) GROUP BY user_email),
 ucst AS (SELECT user_email, sum(dbus) AS dbus,
                 sum(CASE WHEN cost_category = '""" + CHAT_ONLY + """' THEN dbus ELSE 0 END) AS chat_dbus,
+                count(DISTINCT CASE WHEN dbus > 0 THEN usage_date END) AS dbu_days,
                 percent_rank() OVER (ORDER BY sum(dbus)) AS dbu_rank
          FROM c WHERE user_email IS NOT NULL GROUP BY user_email),
+-- Rates across all filtered sessions, quoted in the suggestions so each user's number has a reference point.
+tot AS (SELECT coalesce(sum(cells_failed) / nullif(sum(cells_run), 0), 0) AS t_fail,
+               coalesce(count_if(cells_failed >= """ + str(RETRY_FAILED_CELLS) + """) / nullif(count(*), 0), 0) AS t_retry,
+               coalesce(count_if(active_minutes > """ + str(LONG_SESSION_MINUTES) + """) / nullif(count(*), 0), 0) AS t_long,
+               coalesce(count_if(primary_category <> '""" + READ_ONLY + """') / nullif(count(*), 0), 0) AS t_acted
+        FROM s),
 u AS (
   SELECT coalesce(us.user_email, ucst.user_email) AS user_email,
          coalesce(us.sessions, 0) AS sessions, us.acted, coalesce(us.minutes, 0) AS active_minutes,
@@ -422,15 +527,23 @@ u AS (
          coalesce(us.notebooks, 0) AS notebooks_created, coalesce(us.active_days, 0) AS active_days,
          us.first_seen, us.last_seen, coalesce(us.workspaces, 0) AS workspaces,
          coalesce(uws.primary_workspace, CASE WHEN us.sessions > 0 THEN 'Account-level' END) AS primary_workspace,
-         coalesce(ue.errors, 0) AS actionable_errors, ue.top_cause,
+         coalesce(ue.errors, 0) AS actionable_errors, ue.top_cause, coalesce(ue.top_cause_errors, 0) AS top_cause_errors,
          coalesce(utop.top_category, CASE WHEN us.sessions > 0 THEN '""" + READ_ONLY + """' END) AS top_category,
-         coalesce(ucst.dbus, 0) AS dbus,
+         coalesce(ucst.dbus, 0) AS dbus, coalesce(ucst.dbu_days, 0) AS dbu_days,
          coalesce(ucst.chat_dbus, 0) AS chat_dbus, coalesce(ucst.dbu_rank, 0) AS dbu_rank
   FROM us
   FULL OUTER JOIN ucst ON us.user_email = ucst.user_email
   LEFT JOIN ue ON coalesce(us.user_email, ucst.user_email) = ue.user_email
   LEFT JOIN utop ON us.user_email = utop.user_email
   LEFT JOIN uws ON us.user_email = uws.user_email
+),
+-- Every rule that applies to the user, in priority order. The first is the suggested action; the rest are
+-- listed under "Also consider".
+uf AS (
+  SELECT u.*, tot.*, filter(array(""" + ",\n    ".join(
+    f"CASE WHEN {cond} THEN named_struct('label', {sql_str(label)}, 'msg', {msg}) END"
+    for label, cond, msg in SUGGESTION_RULES) + """), x -> x IS NOT NULL) AS findings
+  FROM u CROSS JOIN tot
 )
 SELECT user_email, coalesce(primary_workspace, '') AS primary_workspace, active_days, first_seen, last_seen,
        notebooks_created, workspaces, coalesce(top_category, '""" + CHAT_ONLY + """') AS top_category, sessions,
@@ -439,23 +552,15 @@ SELECT user_email, coalesce(primary_workspace, '') AS primary_workspace, active_
        actionable_errors, coalesce(top_cause, '') AS top_error_cause, dbus,
        dbus / nullif(sessions, 0) AS dbus_per_session,
        CASE
-         WHEN sessions = 0 AND dbu_rank >= 0.9 THEN 'Top-10% DBUs, all chat: check the use case; for hands-on tasks use the agent in the notebook or editor'
-         WHEN sessions = 0 THEN 'Chat only: no agent actions in this period'
-         WHEN retry_sessions >= 3 THEN 'Retry loops: when a step keeps failing, give the agent the error and a smaller step'
-         WHEN cells_run >= 10 AND cells_failed >= 0.25 * cells_run THEN 'Many failed cells: give exact table and column names, run one step at a time, use /fix'
-         WHEN top_cause = 'Table / schema / catalog not found' AND actionable_errors >= 5 THEN 'Agent guesses names: @-mention tables and set the default catalog and schema'
-         WHEN top_cause = 'Permission denied' AND actionable_errors >= 5 THEN 'Permission errors: request access to the data being used'
-         WHEN top_cause IN ('External tool / MCP call failed', 'External connection auth failed') AND actionable_errors >= 5
-           THEN 'External tool errors: re-authenticate or remove unused MCP servers'
-         WHEN dbu_rank >= 0.9 AND chat_dbus >= 0.8 * dbus
-           THEN 'Top-10% DBUs, mostly chat: check the use case; for hands-on tasks use the agent in the notebook or editor'
-         WHEN sessions >= 5 AND long_sessions >= 0.3 * sessions THEN 'Long sessions: start a new chat per task to cut context DBUs'
-         WHEN sessions >= 5 AND acted < 0.3 * sessions THEN 'Mostly Q&A: add workspace instructions or a Genie Agent for repeat questions'
-         WHEN sessions >= 5 AND acted >= 0.6 * sessions AND cells_failed < 0.1 * greatest(cells_run, 1)
-           THEN 'Effective user: share their prompts and workflows with the team'
-         ELSE 'No action needed'
-       END AS suggested_action
-FROM u"""
+         WHEN size(findings) > 0 THEN element_at(findings, 1).msg
+         WHEN """ + EFFECTIVE_RULE[0] + " THEN " + EFFECTIVE_RULE[1] + """
+         WHEN sessions = 0 THEN """ + FALLBACK_CHAT + """
+         WHEN sessions < 5 THEN """ + FALLBACK_LITTLE + """
+         ELSE """ + FALLBACK_NONE + """
+       END AS suggested_action,
+       CASE WHEN size(findings) > 1 THEN array_join(transform(slice(findings, 2, size(findings) - 1), x -> x.label), '; ')
+            ELSE '' END AS also_consider
+FROM uf"""
 
 ACTION_PARAMS = [DATE_PARAM, P_WS, P_USER, P_TYPE, P_CAT]
 datasets += [
@@ -467,6 +572,7 @@ datasets += [
 
 PCT_FMT = {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
 DBU1_FMT = {"type": "number", "decimalPlaces": {"type": "fixed", "places": 1}}
+DBU0_FMT = {"type": "number", "decimalPlaces": {"type": "fixed", "places": 0}}
 LEGEND_BOTTOM = {"position": "bottom"}
 
 
@@ -523,18 +629,15 @@ ERROR_CAUSE_COLUMNS = [(col("error_cause"), "Cause", None), (total("errors"), "E
                        (SESSIONS, "Sessions", None), (USERS, "Users", None),
                        (col("likely_cause"), "Why it happens", None), (col("how_to_reduce"), "How to reduce it", None)]
 SCORECARD_COLUMNS = [(col("user_email"), "User", None), (col("suggested_action"), "Suggested action", None),
+                     (col("also_consider"), "Also consider", None),
                      (col("top_category"), "Top category", None), (col("primary_workspace"), "Primary workspace", None),
                      (col("sessions"), "Sessions", None), (col("action_rate"), "Action rate", PCT_FMT),
-                     (col("active_days"), "Active days", None), (col("first_seen"), "First seen (retained data)", None),
+                     (col("active_days"), "Days with agent sessions", None), (col("first_seen"), "First seen (retained data)", None),
                      (col("last_seen"), "Last seen", None), (col("active_minutes"), "Active min", None),
                      (col("cells_run"), "Cells run", None), (col("failed_cell_rate"), "Failed cell rate", PCT_FMT),
                      (col("notebooks_created"), "Notebooks created", None),
                      (col("actionable_errors"), "Actionable errors", None), (col("top_error_cause"), "Top error cause", None),
                      (col("dbus"), "DBUs", COUNT_FMT), (col("dbus_per_session"), "DBUs / session", DBU1_FMT)]
-# User Detail shows the rest of the scorecard as KPI tiles, so its table keeps only what the tiles don't.
-SUGGESTION_COLUMNS = [(col("user_email"), "User", None), (col("suggested_action"), "Suggested action", None),
-                      (col("top_error_cause"), "Top error cause", None), (col("retry_sessions"), "Retry sessions", None),
-                      (col("long_sessions"), f"{LONG_SESSION_MINUTES}+ min sessions", None), (col("dbus_per_session"), "DBUs / session", DBU1_FMT)]
 BY_DBUS = [("`dbus`", "DESC")]
 
 # ---------------- Overview page ----------------
@@ -578,6 +681,17 @@ overview = [
                           (SESSIONS, "Sessions (any)", None), (USERS, "Users", None),
                           (total("actions"), "Agent actions", None), (ERROR_RATE, "Error rate", PCT_FMT)],
               pos(0, 20, 12, 7), orders=BY_SESSIONS),
+    {"widget": {"name": "ws_by_cat",
+                "queries": q("ds_main", [f("workspace_name", "`workspace_name`"), f("primary_category", "`primary_category`"), SESSIONS]),
+                "spec": {"version": 3, "widgetType": "pivot",
+                         "encodings": {
+                             "rows": [{"fieldName": "workspace_name", "displayName": "Workspace",
+                                       "scale": {"type": "categorical", "sort": {"by": "cell-reversed", "field": {"index": 0}}}}],
+                             "columns": [{"fieldName": "primary_category", "displayName": "Primary category", "total": {"show": True}}],
+                             "cell": {"type": "multi-cell", "fields": [
+                                 {"fieldName": SESSIONS["name"], "displayName": "Sessions", "cellType": "color-scale"}]}},
+                         "frame": frame("Sessions by workspace and primary category", "'Account-level' = sessions with no workspace-scoped actions")}},
+     "position": pos(0, 27, 12, 9)},
 ]
 
 # ---------------- Usage patterns page ----------------
@@ -629,28 +743,48 @@ patterns = [
               "ds_main", ACTIVITY_COLUMNS, pos(0, 22, 12, 10), orders=BY_SESSIONS),
 ]
 
-# ---------------- Workspaces & users page ----------------
-people = [
-    text("wu_header", ["## Workspaces & users\n", "\n",
-                       "Which workspaces and people use Genie Code most, and for what. 'Account-level' = sessions with no workspace-scoped actions."],
-         pos(0, 0, 12, 2)),
-    {"widget": {"name": "ws_by_cat",
-                "queries": q("ds_main", [f("workspace_name", "`workspace_name`"), f("primary_category", "`primary_category`"), SESSIONS]),
-                "spec": {"version": 3, "widgetType": "pivot",
-                         "encodings": {
-                             "rows": [{"fieldName": "workspace_name", "displayName": "Workspace",
-                                       "scale": {"type": "categorical", "sort": {"by": "cell-reversed", "field": {"index": 0}}}}],
-                             "columns": [{"fieldName": "primary_category", "displayName": "Primary category", "total": {"show": True}}],
-                             "cell": {"type": "multi-cell", "fields": [
-                                 {"fieldName": SESSIONS["name"], "displayName": "Sessions", "cellType": "color-scale"}]}},
-                         "frame": frame("Sessions by workspace and primary category")}},
-     "position": pos(0, 2, 12, 9)},
+# ---------------- User detail page ----------------
+user_detail = [
+    text("ud_header", ["## User detail\n", "\n",
+                       "The user scorecard lists every user, most DBUs first, with a suggested action. Pick one or more users (top right) "
+                       "for a profile: activity totals, where they use Genie Code, what they use it for, and a log of every "
+                       "agent session. With no user selected, the page shows everyone. "
+                       "Trends for the same users are on the other pages via the *User* filter."],
+         pos(0, 0, 8, 2)),
+    None,  # page-level user filter, filled in below once gfilter exists
+    counter("ud_kpi_sessions", "Agent sessions", None, "ds_main", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(0, 2, 3, 3)),
+    counter("ud_kpi_action", "Sessions that took action", None, "ds_main",
+            ACTION_RATE, "session_date", "Action rate", PCT_FMT, pos(3, 2, 3, 3)),
+    counter("ud_kpi_minutes", "Active agent minutes", None, "ds_main",
+            total("session_active_minutes"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
+    counter("ud_kpi_days", "Days with Genie Code use", "Days with any Genie Code event, chat included", "ds_users",
+            f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
+    counter("ud_kpi_dbus", "Genie Code DBUs", "Incl. chat-only days and free tier", "ds_cost",
+            total("dbus"), "usage_date", "DBUs", COUNT_FMT, pos(0, 5, 4, 3)),
+    counter("ud_kpi_failed_cells", "Failed cell rate", "Agent-run notebook cells that failed", "ds_main",
+            FAILED_CELL_RATE, "session_date", "Failed cells", PCT_FMT, pos(4, 5, 4, 3)),
+    counter("ud_kpi_errors", "Actionable errors", "Excludes the agent's expected background probes", "ds_errors",
+            total("errors"), "session_date", "Errors", COUNT_FMT, pos(8, 5, 4, 3)),
     agg_table("user_scorecard", "User scorecard",
-              "One row per user, most DBUs first, for the filtered period. The suggested action is the first rule that applies: "
-              "retry loops, failed cells, guessed names, permissions, external tools, chat-heavy top DBU users, long sessions, "
-              "mostly Q&A, then effective users. Users with DBUs but no agent sessions are included. "
-              "This table doesn't respond to clicks on other visuals; use the filters. Use the User Detail page to drill into one user.",
-              "ds_user_actions", SCORECARD_COLUMNS, pos(0, 11, 12, 10), orders=BY_DBUS),
+              "One row per user, most DBUs first, for the filtered period. The suggested action is the first rule that applies "
+              "(chat-only use, retry loops, failed cells, guessed names, permissions, external tools, chat-heavy top DBU users, "
+              "long sessions, mostly Q&A, then effective users) and quotes the user's numbers against the overall rate. "
+              "Also consider lists the other rules that apply. Users with fewer than 5 sessions and no problem are marked "
+              "too little activity to assess. Users with DBUs but no agent sessions are included. "
+              "With no user picked it lists everyone; pick users (top right) to narrow it. It doesn't respond to clicks on other visuals.",
+              "ds_user_actions", SCORECARD_COLUMNS, pos(0, 8, 12, 10), orders=BY_DBUS),
+    {"widget": {"name": "ud_cat_mix",
+                "queries": q("ds_main", [f("primary_category", "`primary_category`"), SESSIONS]),
+                "spec": {"version": 3, "widgetType": "pie",
+                         "encodings": {
+                             "angle": {"fieldName": SESSIONS["name"], "scale": {"type": "quantitative"}, "displayName": "Sessions"},
+                             "color": cat_color(),
+                             "label": {"show": True}},
+                         "frame": frame("Category mix", "Sessions by primary category")}},
+     "position": pos(0, 18, 6, 8)},
+    agg_table("ud_workspaces", "Workspaces and surfaces used", "Sessions per workspace and surface", "ds_main",
+              [(col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None), (SESSIONS, "Sessions", None)],
+              pos(6, 18, 6, 8), orders=BY_SESSIONS),
     {"widget": {"name": "user_by_cat",
                 "queries": q("ds_main", [f("user_email", "`user_email`"), f("primary_category", "`primary_category`"), SESSIONS]),
                 "spec": {"version": 3, "widgetType": "pivot",
@@ -662,46 +796,7 @@ people = [
                                  {"fieldName": SESSIONS["name"], "displayName": "Sessions", "cellType": "color-scale"}]}},
                          "frame": frame("Sessions by user and primary category",
                                         "Each user's sessions split by what the agent mainly did")}},
-     "position": pos(0, 21, 12, 10)},
-]
-
-# ---------------- User detail page ----------------
-user_detail = [
-    text("ud_header", ["## User detail\n", "\n",
-                       "Pick one or more users (top right) for a profile: activity totals, where they use Genie Code, "
-                       "what they use it for, and a log of every agent session. With no user selected, the page shows everyone. "
-                       "Trends for the same users are on the other pages via the *User* filter."],
-         pos(0, 0, 8, 2)),
-    None,  # page-level user filter, filled in below once gfilter exists
-    counter("ud_kpi_sessions", "Agent sessions", None, "ds_main", SESSIONS, "session_date", "Sessions", COUNT_FMT, pos(0, 2, 3, 3)),
-    counter("ud_kpi_action", "Sessions that took action", None, "ds_main",
-            ACTION_RATE, "session_date", "Action rate", PCT_FMT, pos(3, 2, 3, 3)),
-    counter("ud_kpi_minutes", "Active agent minutes", None, "ds_main",
-            total("session_active_minutes"), "session_date", "Minutes", COUNT_FMT, pos(6, 2, 3, 3)),
-    counter("ud_kpi_days", "Active days", "Days with any Genie Code event", "ds_users",
-            f("countdistinct(event_date)", "COUNT(DISTINCT `event_date`)"), "event_date", "Days", None, pos(9, 2, 3, 3)),
-    counter("ud_kpi_dbus", "Genie Code DBUs", "Incl. chat-only days and free tier", "ds_cost",
-            total("dbus"), "usage_date", "DBUs", COUNT_FMT, pos(0, 5, 4, 3)),
-    counter("ud_kpi_failed_cells", "Failed cell rate", "Agent-run notebook cells that failed", "ds_main",
-            FAILED_CELL_RATE, "session_date", "Failed cells", PCT_FMT, pos(4, 5, 4, 3)),
-    counter("ud_kpi_errors", "Actionable errors", "Excludes the agent's expected background probes", "ds_errors",
-            total("errors"), "session_date", "Errors", COUNT_FMT, pos(8, 5, 4, 3)),
-    agg_table("ud_suggestions", "Suggested action",
-              "From the selected period's sessions, errors and DBUs (rules on the User scorecard, Workspaces & Users page)",
-              "ds_user_actions", SUGGESTION_COLUMNS, pos(0, 8, 12, 4), orders=BY_DBUS,
-              sort_fields=[col("dbus")]),
-    {"widget": {"name": "ud_cat_mix",
-                "queries": q("ds_main", [f("primary_category", "`primary_category`"), SESSIONS]),
-                "spec": {"version": 3, "widgetType": "pie",
-                         "encodings": {
-                             "angle": {"fieldName": SESSIONS["name"], "scale": {"type": "quantitative"}, "displayName": "Sessions"},
-                             "color": cat_color(),
-                             "label": {"show": True}},
-                         "frame": frame("Category mix", "Sessions by primary category")}},
-     "position": pos(0, 12, 6, 8)},
-    agg_table("ud_workspaces", "Workspaces and surfaces used", "Sessions per workspace and surface", "ds_main",
-              [(col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None), (SESSIONS, "Sessions", None)],
-              pos(6, 12, 6, 8), orders=BY_SESSIONS),
+     "position": pos(0, 26, 12, 9)},
     agg_table("ud_categories", "Category breakdown",
               "What the agent did for the selected users in each category. Sessions (any) counts every session that touched it. "
               "Clicking a row filters only this table.",
@@ -710,9 +805,9 @@ user_detail = [
                (SESSIONS, "Sessions (any)", None), (total("category_minutes"), "Active min", None),
                (total("actions"), "Agent actions", None), (total("errors"), "Errors", None),
                (ERROR_RATE, "Error rate", PCT_FMT)],
-              pos(0, 20, 12, 7), orders=BY_SESSIONS),
+              pos(0, 35, 12, 7), orders=BY_SESSIONS),
     agg_table("ud_error_causes", "Errors and how to reduce them", "Actionable errors for the selected users, by cause",
-              "ds_errors", ERROR_CAUSE_COLUMNS, pos(0, 27, 12, 7), orders=[("SUM(`errors`)", "DESC")]),
+              "ds_errors", ERROR_CAUSE_COLUMNS, pos(0, 42, 12, 7), orders=[("SUM(`errors`)", "DESC")]),
     agg_table("ud_session_log", "Session log", "Every Genie Code agent session, newest first", "ds_main",
               [(col("session_start"), "Started (UTC)", None), (col("user_email"), "User", None),
                (col("workspace_name"), "Workspace", None), (col("surface"), "Surface", None),
@@ -722,7 +817,7 @@ user_detail = [
                (total("session_notebooks_created"), "Notebooks created", None),
                (total("session_cells_failed"), "Cells failed", None), (total("session_errors"), "Actionable errors", None),
                (col("session_id"), "Session ID", None)],
-              pos(0, 34, 12, 12), orders=[("`session_start`", "DESC")]),
+              pos(0, 49, 12, 12), orders=[("`session_start`", "DESC")]),
 ]
 
 # ---------------- Action items & DBUs page ----------------
@@ -737,7 +832,7 @@ actions = [
     counter("ac_kpi_dbus", "Genie Code DBUs", "All Genie Code usage, free tier included", "ds_cost",
             total("dbus"), "usage_date", "DBUs", COUNT_FMT, pos(0, 3, 4, 3)),
     counter("ac_kpi_dbus_user", "DBUs per user", "Per user with any Genie Code DBUs", "ds_cost",
-            f("measure(DBUs per user)", "MEASURE(`DBUs per user`)"), "usage_date", "DBUs / user", COUNT_FMT, pos(4, 3, 4, 3)),
+            f("measure(DBUs per user)", "MEASURE(`DBUs per user`)"), "usage_date", "DBUs / user", DBU0_FMT, pos(4, 3, 4, 3)),
     counter("ac_kpi_billable", "Billable share of DBUs", "DBUs outside the free tier", "ds_cost",
             f("measure(Billable share)", "MEASURE(`Billable share`)"), "usage_date", "Billable", PCT_FMT, pos(8, 3, 4, 3)),
     agg_table("ac_items", "Action items",
@@ -884,7 +979,6 @@ dashboard = {
     # Descriptive pages first, then diagnosis, then recommendations.
     "pages": [page("overview", "Overview", overview),
               page("patterns", "Usage Patterns", patterns),
-              page("people", "Workspaces & Users", people),
               page("user_detail", "User Detail", user_detail),
               page("errors", "Errors & Fixes", errors_page),
               page("actions", "Action Items & DBUs", actions),
