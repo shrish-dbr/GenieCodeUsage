@@ -145,17 +145,13 @@ MONTH = lambda col: f(f"monthly({col})", f'DATE_TRUNC("MONTH", `{col}`)')
 
 
 def counter(name, title, desc, ds, value_field, period_col, display, fmt=None, p=None, filters=None):
-    # The headline value re-aggregates the per-period rows, which is only correct for additive
-    # measures (SUM). COUNT(DISTINCT) / AVG counters get no period, so they show the true total.
+    # Headline = the filtered period's total. No period encoding: with one, the tile shows only the latest
+    # week's value (often a partial week), not the total the title describes. period_col is kept for callers.
     value = {"fieldName": value_field["name"], "displayName": display}
     if fmt:
         value["format"] = fmt
-    fields, enc = [value_field], {"value": value}
-    if value_field["name"].startswith("sum("):
-        fields.append(WEEK(period_col))
-        enc["period"] = {"fieldName": f"weekly({period_col})"}
-    return {"widget": {"name": name, "queries": q(ds, fields, filters=filters),
-                       "spec": {"version": 2, "widgetType": "counter", "encodings": enc,
+    return {"widget": {"name": name, "queries": q(ds, [value_field], filters=filters),
+                       "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": value},
                                 "frame": frame(title, desc)}},
             "position": p}
 
@@ -271,7 +267,8 @@ COST_CAT_SCALE = {"type": "categorical",
 
 
 def sql_str(v):
-    return "'" + v.replace("'", "''") + "'"
+    # Databricks SQL reads 'doesn''t' as two adjacent literals ("doesnt"), so escape with a backslash.
+    return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 FIXES_CTE = "fixes AS (SELECT * FROM VALUES\n  " + ",\n  ".join(
@@ -575,6 +572,7 @@ datasets += [
 
 PCT_FMT = {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
 DBU1_FMT = {"type": "number", "decimalPlaces": {"type": "fixed", "places": 1}}
+DBU0_FMT = {"type": "number", "decimalPlaces": {"type": "fixed", "places": 0}}
 LEGEND_BOTTOM = {"position": "bottom"}
 
 
@@ -834,7 +832,7 @@ actions = [
     counter("ac_kpi_dbus", "Genie Code DBUs", "All Genie Code usage, free tier included", "ds_cost",
             total("dbus"), "usage_date", "DBUs", COUNT_FMT, pos(0, 3, 4, 3)),
     counter("ac_kpi_dbus_user", "DBUs per user", "Per user with any Genie Code DBUs", "ds_cost",
-            f("measure(DBUs per user)", "MEASURE(`DBUs per user`)"), "usage_date", "DBUs / user", COUNT_FMT, pos(4, 3, 4, 3)),
+            f("measure(DBUs per user)", "MEASURE(`DBUs per user`)"), "usage_date", "DBUs / user", DBU0_FMT, pos(4, 3, 4, 3)),
     counter("ac_kpi_billable", "Billable share of DBUs", "DBUs outside the free tier", "ds_cost",
             f("measure(Billable share)", "MEASURE(`Billable share`)"), "usage_date", "Billable", PCT_FMT, pos(8, 3, 4, 3)),
     agg_table("ac_items", "Action items",

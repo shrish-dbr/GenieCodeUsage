@@ -68,7 +68,7 @@ It covers Genie Code only. It does **not** include people chatting directly in G
 - **Filters page:** Date, Workspace, User, User type, Surface, Primary category and Client type. Some filters don't reach every visual because the data behind them has no such field; see [section 9](#9-filters-and-cross-filtering).
 - **User(s) picker (User Detail only):** narrows that page, including the scorecard, to the selected people. With nobody selected the page shows everyone.
 - **Click to cross-filter:** clicking a bar, pie slice, heatmap cell, pivot cell or table row filters the other visuals on the same page that use the same data. Click it again, or clear the selection, to reset. KPI tiles and line charts respond to clicks but don't start them. The action items and the user scorecard are calculated in their own queries, so they follow the filters but not clicks.
-- **KPI trend lines:** tiles whose number is a total (*Active agent minutes*, *Genie Code DBUs*, *Actionable errors*) show the weekly totals under the number. Rates and distinct counts show only the period total, because weekly values of those can't be added up to the headline.
+- **KPI tiles:** every tile shows the total or rate for the filtered period. Trends over time are in the monthly charts on each page.
 - **Tables:** click a column header to sort. Use the widget menu to download the data behind a visual.
 
 ### Reading tips
@@ -85,7 +85,7 @@ It covers Genie Code only. It does **not** include people chatting directly in G
 
 ## 3. Page by page: every KPI and visual
 
-Each page lists its KPI tiles (what the number measures and how to read it), then its visuals (what each shows and what to use it for). *(trend)* marks KPI tiles with a weekly trend line. Exact formulas are in [section 8](#8-metric-definitions).
+Each page lists its KPI tiles (what the number measures and how to read it), then its visuals (what each shows and what to use it for). Every KPI covers the filtered period. Exact formulas are in [section 8](#8-metric-definitions).
 
 ### Overview: is it being adopted, and for what?
 
@@ -121,11 +121,11 @@ Use the **User scorecard** to find who to look at, then pick them with the **Use
 |---|---|---|
 | **Agent sessions** | The selected users' agent sessions | Volume of their agent use |
 | **Sessions that took action** | Share of their sessions in which the agent changed or ran something | Low means they mostly ask questions; compare with the Overview value |
-| **Active agent minutes** *(trend)* | Distinct minutes in which the agent was working for them, summed over sessions | Time the agent spent on their work. It isn't the time the person spent. |
+| **Active agent minutes** | Distinct minutes in which the agent was working for them, summed over sessions | Time the agent spent on their work. It isn't the time the person spent. |
 | **Days with Genie Code use** | Days with any Genie Code interaction, chat included | How regularly they use it. It can be higher than *Days with agent sessions* in the scorecard, which counts only days with agent activity. |
-| **Genie Code DBUs** *(trend)* | Their Genie Code DBUs, free tier and chat-only days included | What their use costs |
+| **Genie Code DBUs** | Their Genie Code DBUs, free tier and chat-only days included | What their use costs |
 | **Failed cell rate** | Share of the notebook cells the agent ran for them that failed | High means the agent often writes code that fails for them: see their error causes |
-| **Actionable errors** *(trend)* | Their failed agent actions, excluding expected background checks | Total errors to work on; the causes are in the table further down |
+| **Actionable errors** | Their failed agent actions, excluding expected background checks | Total errors to work on; the causes are in the table further down |
 
 | Visual | What it shows | Use it to |
 |---|---|---|
@@ -158,7 +158,7 @@ Errors here are failed agent actions: HTTP 4xx/5xx responses and failed notebook
 |---|---|---|
 | **Failed cell rate** | Share of agent-run notebook cells that failed | The clearest quality signal. It should fall as prompts and instructions improve. The audit log doesn't record why a cell failed. |
 | **Sessions with an error** | Share of sessions with at least one actionable error | How often users run into a failure |
-| **Actionable errors** *(trend)* | Count of failed agent actions, background checks excluded | Overall error volume |
+| **Actionable errors** | Count of failed agent actions, background checks excluded | Overall error volume |
 
 | Visual | What it shows | Use it to |
 |---|---|---|
@@ -176,7 +176,7 @@ DBUs are Genie Code usage from `system.billing.usage`, free tier included. The d
 
 | KPI | What it measures | How to read it |
 |---|---|---|
-| **Genie Code DBUs** *(trend)* | All Genie Code DBUs in the period, free tier included | Total consumption |
+| **Genie Code DBUs** | All Genie Code DBUs in the period, free tier included | Total consumption |
 | **DBUs per user** | DBUs divided by users with any DBUs | Typical cost per user; compare periods to see whether it's rising |
 | **Billable share of DBUs** | Share of DBUs outside the free tier | How much of the use is paid for |
 
@@ -370,7 +370,7 @@ Grouping by minute keeps the view compact. It's also the unit used for *active m
 |---|---|
 | **Owner** (`user_email`) | The **email** identity with the most actions in the session. A session can include internal service principals, so emails are preferred. If no email identity exists, it falls back to the identity with the most actions. |
 | **Workspace** | The **non-zero** workspace with the most actions. Some agent calls are account-level and logged with `workspace_id = 0`. Sessions with only account-level calls show as `Account-level`. |
-| **Surface** | The `group/` value with the most actions, mapped as: `assistant` → *Genie Code panel*, `embed` → *Embedded*, `document` → *Document*, `viz` → *Visualization*. Other values pass through as-is, and a missing value shows as *Unknown*. |
+| **Surface** | The `group/` value with the most actions, mapped as: `assistant` → *Genie Code panel*, `embed` → *Embedded*, `document` → *Document*, `viz` → *Visualization*. `designer` → *Designer*. Other values are shown title-cased, and a missing value shows as *Unknown*. |
 | `session_date` | Date of the session's first event (UTC) |
 | `session_start` / `session_end` | First and last event minute |
 | `duration_minutes` | `session_end − session_start` in minutes, **+1**. A session within a single minute has a duration of 1. |
@@ -647,7 +647,7 @@ Click a bar, heatmap cell, pivot cell or table row, and the other `ds_main` visu
 | **Primary category** | The category with the most active minutes in a session |
 | **Q&A / Read-only** | A session with no category actions: the agent only answered |
 | **Active minute** | A calendar minute with at least one agent event |
-| **Surface** | Where Genie Code was invoked: Genie Code panel, Embedded, Document or Visualization |
+| **Surface** | Where Genie Code was invoked: Genie Code panel, Embedded, Document, Visualization or Designer |
 | **Client type** | How the interaction reached Genie Code (browser, background agent, Genie Code service, other) |
 | **Action rate** | Share of sessions that aren't Q&A / Read-only |
 | **Account-level** | A session whose actions all had `workspace_id = 0` |
